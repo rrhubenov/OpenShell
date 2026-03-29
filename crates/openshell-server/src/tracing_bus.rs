@@ -14,11 +14,14 @@ use tracing_subscriber::layer::Context;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::{EnvFilter, Layer};
 
+use crate::otlp_exporter::{OtlpConfig, OtlpExportHandle, init_otlp_exporter};
+
 /// Bus that publishes server log lines keyed by sandbox id.
 #[derive(Debug, Clone)]
 pub struct TracingLogBus {
     inner: Arc<Mutex<Inner>>,
     pub(crate) platform_event_bus: PlatformEventBus,
+    otlp_handle: Option<Arc<OtlpExportHandle>>,
 }
 
 #[derive(Debug)]
@@ -29,19 +32,27 @@ struct Inner {
 
 impl Default for TracingLogBus {
     fn default() -> Self {
-        Self::new()
+        Self::new(None)
     }
 }
 
 impl TracingLogBus {
+    /// Create a new `TracingLogBus` with optional OTLP export.
+    ///
+    /// If `otlp_config` is `Some` and the endpoint is valid, logs will be
+    /// exported to the specified OTLP endpoint in addition to the in-memory
+    /// broadcast channels and tail buffers.
     #[must_use]
-    pub fn new() -> Self {
+    pub fn new(otlp_config: Option<OtlpConfig>) -> Self {
+        let otlp_handle = otlp_config.as_ref().and_then(init_otlp_exporter).map(Arc::new);
+
         Self {
             inner: Arc::new(Mutex::new(Inner {
                 per_id: HashMap::new(),
                 tails: HashMap::new(),
             })),
             platform_event_bus: PlatformEventBus::new(),
+            otlp_handle,
         }
     }
 
@@ -115,9 +126,20 @@ impl TracingLogBus {
     const DEFAULT_TAIL: usize = 2000;
 
     fn publish(&self, sandbox_id: &str, event: SandboxStreamEvent, tail_cap: usize) {
+        // OTLP export (non-blocking, best-effort)
+        if let Some(ref handle) = self.otlp_handle {
+            if let Some(openshell_core::proto::sandbox_stream_event::Payload::Log(ref log)) =
+                event.payload
+            {
+                handle.try_export(log);
+            }
+        }
+
+        // Broadcast to subscribers
         let tx = self.sender_for(sandbox_id);
         let _ = tx.send(event.clone());
 
+        // Append to tail buffer
         let mut inner = self.inner.lock().expect("tracing bus lock poisoned");
         let deque = inner.tails.entry(sandbox_id.to_string()).or_default();
         deque.push_back(event);
@@ -214,7 +236,7 @@ mod tests {
 
     #[test]
     fn tracing_log_bus_remove_cleans_up_all_maps() {
-        let bus = TracingLogBus::new();
+        let bus = TracingLogBus::new(None);
         let sandbox_id = "sb-1";
 
         // Create entries via subscribe and publish
@@ -233,7 +255,7 @@ mod tests {
 
     #[test]
     fn tracing_log_bus_subscribe_after_remove_creates_fresh_channel() {
-        let bus = TracingLogBus::new();
+        let bus = TracingLogBus::new(None);
         let sandbox_id = "sb-2";
 
         // Create and remove
@@ -252,7 +274,7 @@ mod tests {
 
     #[test]
     fn tracing_log_bus_remove_closes_active_receivers() {
-        let bus = TracingLogBus::new();
+        let bus = TracingLogBus::new(None);
         let sandbox_id = "sb-3";
 
         let mut rx = bus.subscribe(sandbox_id);
@@ -269,7 +291,7 @@ mod tests {
 
     #[test]
     fn tracing_log_bus_remove_nonexistent_is_noop() {
-        let bus = TracingLogBus::new();
+        let bus = TracingLogBus::new(None);
         // Should not panic
         bus.remove("nonexistent");
     }

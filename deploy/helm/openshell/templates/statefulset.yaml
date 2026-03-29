@@ -95,6 +95,20 @@ spec:
               value: "true"
             {{- end }}
             {{- end }}
+            {{- if .Values.otlp.enabled }}
+            - name: OPENSHELL_OTLP_ENDPOINT
+              {{- if .Values.otlp.endpoint }}
+              value: {{ .Values.otlp.endpoint | quote }}
+              {{- else }}
+              value: "http://{{ include "openshell.fullname" . }}-otel-collector:4317"
+              {{- end }}
+            - name: OPENSHELL_OTLP_SERVICE_NAME
+              value: {{ .Values.otlp.serviceName | quote }}
+            - name: OPENSHELL_OTLP_BATCH_SIZE
+              value: {{ .Values.otlp.batchSize | quote }}
+            - name: OPENSHELL_OTLP_TIMEOUT_MS
+              value: {{ .Values.otlp.timeoutMs | quote }}
+            {{- end }}
           volumeMounts:
             - name: openshell-data
               mountPath: /var/openshell

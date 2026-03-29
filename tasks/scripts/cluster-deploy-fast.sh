@@ -424,6 +424,14 @@ if [[ "${needs_helm_upgrade}" == "1" ]]; then
     HOST_GATEWAY_ARGS="--set server.hostGatewayIP=${HOST_GATEWAY_IP}"
   fi
 
+  OTLP_ARGS=""
+  if [[ "${OPENSHELL_OTLP_ENABLED:-0}" == "1" ]]; then
+    OTLP_ARGS="--set otlp.enabled=true"
+    if [[ -n "${OPENSHELL_OTLP_ENDPOINT:-}" ]]; then
+      OTLP_ARGS="${OTLP_ARGS} --set otlp.endpoint=${OPENSHELL_OTLP_ENDPOINT}"
+    fi
+  fi
+
   cluster_exec "helm upgrade openshell ${CONTAINER_CHART_DIR} \
     --namespace openshell \
     --set image.repository=${IMAGE_REPO_BASE}/gateway \
@@ -435,6 +443,7 @@ if [[ "${needs_helm_upgrade}" == "1" ]]; then
     --set server.tls.clientTlsSecretName=openshell-client-tls \
     --set server.sshHandshakeSecret=${SSH_HANDSHAKE_SECRET} \
     ${HOST_GATEWAY_ARGS} \
+    ${OTLP_ARGS} \
     ${helm_wait_args}"
   helm_end=$(date +%s)
   log_duration "Helm upgrade" "${helm_start}" "${helm_end}"

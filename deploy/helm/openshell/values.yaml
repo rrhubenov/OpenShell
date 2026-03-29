@@ -112,3 +112,44 @@ server:
 # NetworkPolicy restricting SSH ingress on sandbox pods to the gateway only.
 networkPolicy:
   enabled: true
+
+# OTLP log export configuration.
+# When enabled, gateway logs are exported to an OpenTelemetry Collector.
+otlp:
+  # Enable OTLP log export. When true, deploys a collector and configures
+  # the gateway to send logs to it.
+  enabled: false
+  # OTLP endpoint. If empty and otlp.enabled=true, uses the in-cluster collector.
+  # Set to an external endpoint to skip deploying the collector.
+  endpoint: ""
+  # Service name for OTel resource attributes.
+  serviceName: "openshell-gateway"
+  # Export batch size.
+  batchSize: 512
+  # Export timeout in milliseconds.
+  timeoutMs: 5000
+  # Collector configuration (only used when otlp.enabled=true and otlp.endpoint="")
+  collector:
+    image:
+      repository: otel/opentelemetry-collector
+      tag: "latest"
+      pullPolicy: IfNotPresent
+    # Collector config - exports to stdout by default for debugging.
+    # Override with a full collector config for production use.
+    config: |
+      receivers:
+        otlp:
+          protocols:
+            grpc:
+              endpoint: 0.0.0.0:4317
+      processors:
+        batch:
+      exporters:
+        debug:
+          verbosity: detailed
+      service:
+        pipelines:
+          logs:
+            receivers: [otlp]
+            processors: [batch]
+            exporters: [debug]

@@ -14,6 +14,7 @@ mod grpc;
 mod http;
 mod inference;
 mod multiplex;
+pub mod otlp_exporter;
 mod persistence;
 mod sandbox;
 mod sandbox_index;

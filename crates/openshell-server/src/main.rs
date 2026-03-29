@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
-use openshell_server::{run_server, tracing_bus::TracingLogBus};
+use openshell_server::{run_server, tracing_bus::TracingLogBus, otlp_exporter::OtlpConfig};
 
 /// `OpenShell` Server - gRPC and HTTP server with protocol multiplexing.
 #[derive(Parser, Debug)]
@@ -108,6 +108,23 @@ struct Args {
     /// certificate. Ignored when --disable-tls is set.
     #[arg(long, env = "OPENSHELL_DISABLE_GATEWAY_AUTH")]
     disable_gateway_auth: bool,
+
+    /// OTLP gRPC endpoint for log export (e.g., "http://otel-collector:4317").
+    /// When set, all logs are exported via OTLP in addition to existing outputs.
+    #[arg(long, env = "OPENSHELL_OTLP_ENDPOINT")]
+    otlp_endpoint: Option<String>,
+
+    /// Service name for OTLP resource attributes.
+    #[arg(long, env = "OPENSHELL_OTLP_SERVICE_NAME", default_value = "openshell-gateway")]
+    otlp_service_name: String,
+
+    /// OTLP export batch size.
+    #[arg(long, env = "OPENSHELL_OTLP_BATCH_SIZE", default_value_t = 512)]
+    otlp_batch_size: usize,
+
+    /// OTLP export timeout in milliseconds.
+    #[arg(long, env = "OPENSHELL_OTLP_TIMEOUT_MS", default_value_t = 5000)]
+    otlp_timeout_ms: u64,
 }
 
 #[tokio::main]
@@ -118,8 +135,16 @@ async fn main() -> Result<()> {
 
     let args = Args::parse();
 
-    // Initialize tracing
-    let tracing_log_bus = TracingLogBus::new();
+    // Build OTLP config if endpoint is specified
+    let otlp_config = args.otlp_endpoint.as_ref().map(|endpoint| OtlpConfig {
+        endpoint: endpoint.clone(),
+        service_name: args.otlp_service_name.clone(),
+        batch_size: args.otlp_batch_size,
+        timeout_ms: args.otlp_timeout_ms,
+    });
+
+    // Initialize tracing with optional OTLP export
+    let tracing_log_bus = TracingLogBus::new(otlp_config);
     tracing_log_bus.install_subscriber(
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&args.log_level)),
     );

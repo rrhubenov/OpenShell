@@ -1,0 +1,79 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+{{- if and .Values.otlp.enabled (not .Values.otlp.endpoint) }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "openshell.fullname" . }}-otel-collector
+  labels:
+    {{- include "openshell.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    {{- .Values.otlp.collector.config | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "openshell.fullname" . }}-otel-collector
+  labels:
+    {{- include "openshell.labels" . | nindent 4 }}
+    app.kubernetes.io/component: otel-collector
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "openshell.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: otel-collector
+  template:
+    metadata:
+      labels:
+        {{- include "openshell.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: otel-collector
+      annotations:
+        checksum/config: {{ .Values.otlp.collector.config | sha256sum }}
+    spec:
+      containers:
+        - name: otel-collector
+          image: "{{ .Values.otlp.collector.image.repository }}:{{ .Values.otlp.collector.image.tag }}"
+          imagePullPolicy: {{ .Values.otlp.collector.image.pullPolicy }}
+          args:
+            - --config=/etc/otel/config.yaml
+          ports:
+            - name: otlp-grpc
+              containerPort: 4317
+              protocol: TCP
+          volumeMounts:
+            - name: config
+              mountPath: /etc/otel
+              readOnly: true
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "openshell.fullname" . }}-otel-collector
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "openshell.fullname" . }}-otel-collector
+  labels:
+    {{- include "openshell.labels" . | nindent 4 }}
+    app.kubernetes.io/component: otel-collector
+spec:
+  selector:
+    {{- include "openshell.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: otel-collector
+  ports:
+    - name: otlp-grpc
+      port: 4317
+      targetPort: otlp-grpc
+      protocol: TCP
+{{- end }}
