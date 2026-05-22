@@ -3640,57 +3640,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "openshell-sandbox"
-version = "0.0.0"
-dependencies = [
- "anyhow",
- "apollo-parser",
- "base64 0.22.1",
- "bytes",
- "clap",
- "flate2",
- "futures",
- "glob",
- "hex",
- "hmac",
- "ipnet",
- "landlock",
- "libc",
- "miette",
- "nix",
- "openshell-core",
- "openshell-ocsf",
- "openshell-policy",
- "openshell-router",
- "rand_core 0.6.4",
- "rcgen",
- "regorus",
- "russh",
- "rustix 1.1.4",
- "rustls",
- "rustls-pemfile",
- "seccompiler",
- "serde",
- "serde_json",
- "serde_yml",
- "sha1 0.10.6",
- "sha2 0.10.9",
- "temp-env",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-rustls",
- "tokio-stream",
- "tokio-tungstenite 0.26.2",
- "tonic",
- "tracing",
- "tracing-appender",
- "tracing-subscriber",
- "uuid",
- "webpki-roots 1.0.7",
-]
-
-[[package]]
 name = "openshell-server"
 version = "0.0.0"
 dependencies = [
@@ -3756,6 +3705,57 @@ dependencies = [
  "uuid",
  "wiremock",
  "x509-parser",
+]
+
+[[package]]
+name = "openshell-supervisor"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "apollo-parser",
+ "base64 0.22.1",
+ "bytes",
+ "clap",
+ "flate2",
+ "futures",
+ "glob",
+ "hex",
+ "hmac",
+ "ipnet",
+ "landlock",
+ "libc",
+ "miette",
+ "nix",
+ "openshell-core",
+ "openshell-ocsf",
+ "openshell-policy",
+ "openshell-router",
+ "rand_core 0.6.4",
+ "rcgen",
+ "regorus",
+ "russh",
+ "rustix 1.1.4",
+ "rustls",
+ "rustls-pemfile",
+ "seccompiler",
+ "serde",
+ "serde_json",
+ "serde_yml",
+ "sha1 0.10.6",
+ "sha2 0.10.9",
+ "temp-env",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-rustls",
+ "tokio-stream",
+ "tokio-tungstenite 0.26.2",
+ "tonic",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+ "uuid",
+ "webpki-roots 1.0.7",
 ]
 
 [[package]]
@@ -4982,9 +4982,9 @@ checksum = "f87165f0995f63a9fbeea62b64d10b4d9d8e78ec6d7d51fb2125fda7bb36788f"
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.13"
+version = "0.103.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "61c429a8649f110dddef65e2a5ad240f747e85f7758a6bccc7e5777bd33f756e"
+checksum = "8279bb85272c9f10811ae6a6c547ff594d6a7f3c6c6b02ee9726d1d0dcfcdd06"
 dependencies = [
  "aws-lc-rs",
  "ring",

@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [package]
-name = "openshell-sandbox"
-description = "OpenShell process sandbox and monitor"
+name = "openshell-supervisor"
+description = "OpenShell sandbox supervisor (network + process components)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

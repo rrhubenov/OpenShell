@@ -15,7 +15,7 @@ use tracing_subscriber::EnvFilter;
 use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::{Layer, layer::SubscriberExt, util::SubscriberInitExt};
 
-use openshell_sandbox::run_sandbox;
+use openshell_supervisor::run_sandbox;
 
 /// Subcommand name used to self-copy the supervisor binary into a shared volume.
 ///
@@ -168,7 +168,7 @@ fn main() -> Result<()> {
             .into_diagnostic()?;
         return runtime.block_on(async move {
             let _ = rustls::crypto::ring::default_provider().install_default();
-            let exit = openshell_sandbox::debug_rpc::run(&raw_args[2..]).await?;
+            let exit = openshell_supervisor::debug_rpc::run(&raw_args[2..]).await?;
             std::process::exit(exit);
         });
     }
@@ -206,11 +206,11 @@ fn main() -> Result<()> {
         let log_push_state = if let (Some(sandbox_id), Some(endpoint)) =
             (&args.sandbox_id, &args.openshell_endpoint)
         {
-            let (tx, handle) = openshell_sandbox::log_push::spawn_log_push_task(
+            let (tx, handle) = openshell_supervisor::log_push::spawn_log_push_task(
                 endpoint.clone(),
                 sandbox_id.clone(),
             );
-            let layer = openshell_sandbox::log_push::LogPushLayer::new(sandbox_id.clone(), tx);
+            let layer = openshell_supervisor::log_push::LogPushLayer::new(sandbox_id.clone(), tx);
             Some((layer, handle))
         } else {
             None
