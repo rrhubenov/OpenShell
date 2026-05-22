@@ -377,6 +377,12 @@ pub async fn run_sandbox(
         provider_env,
         provider_credential_expires_at_ms,
     );
+    // NOTE: This snapshot is taken once at supervisor startup. SSH-spawned
+    // children see this frozen view for the entire supervisor lifetime and
+    // will NOT observe credential rotations from the settings poll loop.
+    // The proxy still sees rotations live via resolver(); only direct env
+    // reads inside SSH children are stale.
+    // Alternative is a shared RWLock around the state.
     let provider_env = provider_credentials.snapshot().child_env.clone();
 
     // Create identity cache for SHA256 TOFU when OPA is active
@@ -731,7 +737,7 @@ pub async fn run_sandbox(
         let proxy_url = ssh_proxy_url;
         let netns_fd = ssh_netns_fd;
         let ca_paths = ca_file_paths.clone();
-        let provider_credentials_clone = provider_credentials.clone();
+        let ssh_provider_env = provider_credentials.snapshot().child_env.clone();
 
         let (ssh_ready_tx, ssh_ready_rx) = tokio::sync::oneshot::channel();
 
@@ -744,7 +750,7 @@ pub async fn run_sandbox(
                 netns_fd,
                 proxy_url,
                 ca_paths,
-                provider_credentials_clone,
+                ssh_provider_env,
             )
             .await
             {

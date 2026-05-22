@@ -6,7 +6,6 @@
 use crate::child_env;
 use crate::policy::SandboxPolicy;
 use crate::process::drop_privileges;
-use crate::provider_credentials::ProviderCredentialState;
 use crate::sandbox;
 #[cfg(target_os = "linux")]
 use crate::{register_managed_child, unregister_managed_child};
@@ -106,7 +105,7 @@ pub async fn run_ssh_server(
     netns_fd: Option<RawFd>,
     proxy_url: Option<String>,
     ca_file_paths: Option<(PathBuf, PathBuf)>,
-    provider_credentials: ProviderCredentialState,
+    provider_env: HashMap<String, String>,
 ) -> Result<()> {
     let (listener, config, ca_paths) = match ssh_server_init(&listen_path, &ca_file_paths) {
         Ok(v) => {
@@ -130,7 +129,7 @@ pub async fn run_ssh_server(
         let workdir = workdir.clone();
         let proxy_url = proxy_url.clone();
         let ca_paths = ca_paths.clone();
-        let provider_credentials = provider_credentials.clone();
+        let provider_env = provider_env.clone();
 
         tokio::spawn(async move {
             if let Err(err) = handle_connection(
@@ -141,7 +140,7 @@ pub async fn run_ssh_server(
                 netns_fd,
                 proxy_url,
                 ca_paths,
-                provider_credentials,
+                provider_env,
             )
             .await
             {
@@ -167,7 +166,7 @@ async fn handle_connection(
     netns_fd: Option<RawFd>,
     proxy_url: Option<String>,
     ca_file_paths: Option<Arc<(PathBuf, PathBuf)>>,
-    provider_credentials: ProviderCredentialState,
+    provider_env: HashMap<String, String>,
 ) -> Result<()> {
     // Access is gated by the Unix-socket filesystem permissions (root-only),
     // not by an application-level preface. The supervisor bridges the
@@ -189,7 +188,7 @@ async fn handle_connection(
         netns_fd,
         proxy_url,
         ca_file_paths,
-        provider_credentials,
+        provider_env,
     );
     russh::server::run_stream(config, stream, handler)
         .await
@@ -216,7 +215,7 @@ struct SshHandler {
     netns_fd: Option<RawFd>,
     proxy_url: Option<String>,
     ca_file_paths: Option<Arc<(PathBuf, PathBuf)>>,
-    provider_credentials: ProviderCredentialState,
+    provider_env: HashMap<String, String>,
     channels: HashMap<ChannelId, ChannelState>,
 }
 
@@ -227,7 +226,7 @@ impl SshHandler {
         netns_fd: Option<RawFd>,
         proxy_url: Option<String>,
         ca_file_paths: Option<Arc<(PathBuf, PathBuf)>>,
-        provider_credentials: ProviderCredentialState,
+        provider_env: HashMap<String, String>,
     ) -> Self {
         Self {
             policy,
@@ -235,7 +234,7 @@ impl SshHandler {
             netns_fd,
             proxy_url,
             ca_file_paths,
-            provider_credentials,
+            provider_env,
             channels: HashMap::new(),
         }
     }
@@ -457,7 +456,7 @@ impl russh::server::Handler for SshHandler {
                 self.netns_fd,
                 self.proxy_url.clone(),
                 self.ca_file_paths.clone(),
-                &self.provider_credentials.snapshot().child_env,
+                &self.provider_env,
             )?;
             let state = self.channels.get_mut(&channel).ok_or_else(|| {
                 anyhow::anyhow!("subsystem_request on unknown channel {channel:?}")
@@ -534,7 +533,6 @@ impl SshHandler {
         handle: Handle,
         command: Option<String>,
     ) -> anyhow::Result<()> {
-        let provider_snapshot = self.provider_credentials.snapshot();
         let state = self
             .channels
             .get_mut(&channel)
@@ -552,7 +550,7 @@ impl SshHandler {
                 self.netns_fd,
                 self.proxy_url.clone(),
                 self.ca_file_paths.clone(),
-                &provider_snapshot.child_env,
+                &self.provider_env,
             )?;
             state.pty_master = Some(pty_master);
             state.input_sender = Some(input_sender);
@@ -569,7 +567,7 @@ impl SshHandler {
                 self.netns_fd,
                 self.proxy_url.clone(),
                 self.ca_file_paths.clone(),
-                &provider_snapshot.child_env,
+                &self.provider_env,
             )?;
             state.input_sender = Some(input_sender);
         }
