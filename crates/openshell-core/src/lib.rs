@@ -23,6 +23,7 @@ pub mod metadata;
 pub mod net;
 pub mod ocsf_ctx;
 pub mod paths;
+pub mod policy;
 pub mod procfs;
 pub mod progress;
 pub mod proto;

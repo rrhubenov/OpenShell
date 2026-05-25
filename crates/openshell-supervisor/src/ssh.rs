@@ -4,7 +4,7 @@
 //! Embedded SSH server for sandbox access.
 
 use crate::child_env;
-use crate::policy::SandboxPolicy;
+use openshell_core::policy::SandboxPolicy;
 use crate::process::drop_privileges;
 use crate::sandbox;
 #[cfg(target_os = "linux")]
@@ -1468,7 +1468,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn pre_exec_always_calls_drop_privileges() {
-        use crate::policy::{
+        use openshell_core::policy::{
             FilesystemPolicy, LandlockPolicy, NetworkPolicy, ProcessPolicy, SandboxPolicy,
         };
 

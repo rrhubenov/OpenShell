@@ -126,6 +126,32 @@ pub fn is_file_permissions_too_open(path: &Path) -> bool {
     std::fs::metadata(path).is_ok_and(|m| m.permissions().mode() & 0o077 != 0)
 }
 
+/// Normalize a filesystem path by collapsing redundant separators
+/// and removing trailing slashes, without requiring the path to exist on disk.
+///
+/// This is a lexical normalization only — it does NOT resolve symlinks or
+/// check the filesystem.
+pub fn normalize_path(path: &str) -> String {
+    use std::path::Component;
+
+    let p = Path::new(path);
+    let mut normalized = PathBuf::new();
+    for component in p.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            #[allow(clippy::path_buf_push_overwrite)]
+            Component::RootDir => normalized.push("/"),
+            Component::CurDir => {} // skip "."
+            Component::ParentDir => {
+                // Keep ".." — validation will catch it separately
+                normalized.push("..");
+            }
+            Component::Normal(c) => normalized.push(c),
+        }
+    }
+    normalized.to_string_lossy().to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

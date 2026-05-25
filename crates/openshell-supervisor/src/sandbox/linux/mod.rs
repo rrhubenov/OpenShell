@@ -8,7 +8,7 @@ pub mod netns;
 mod nft_ruleset;
 mod seccomp;
 
-use crate::policy::SandboxPolicy;
+use openshell_core::policy::SandboxPolicy;
 use miette::Result;
 use std::path::PathBuf;
 use std::sync::Once;
@@ -118,7 +118,7 @@ pub fn log_sandbox_readiness(policy: &SandboxPolicy, workdir: Option<&str>) {
         // previously invisible because it only fired inside pre_exec.
         let is_best_effort = matches!(
             policy.landlock.compatibility,
-            crate::policy::LandlockCompatibility::BestEffort
+            openshell_core::policy::LandlockCompatibility::BestEffort
         );
         let (desc, msg) = if is_best_effort {
             (

@@ -15,7 +15,6 @@ pub mod l7;
 pub mod log_push;
 pub mod mechanistic_mapper;
 pub mod opa;
-mod policy;
 mod policy_local;
 mod process;
 mod provider_credentials;
@@ -148,7 +147,7 @@ use crate::l7::tls::{
     write_ca_files,
 };
 use crate::opa::OpaEngine;
-use crate::policy::{NetworkMode, NetworkPolicy, ProxyPolicy, SandboxPolicy};
+use openshell_core::policy::{NetworkMode, NetworkPolicy, ProxyPolicy, SandboxPolicy};
 use crate::proxy::ProxyHandle;
 #[cfg(target_os = "linux")]
 use crate::sandbox::linux::netns::NetworkNamespace;
@@ -1634,7 +1633,7 @@ fn enrich_sandbox_baseline_paths(policy: &mut SandboxPolicy) {
 )]
 mod baseline_tests {
     use super::*;
-    use crate::policy::{FilesystemPolicy, LandlockPolicy, ProcessPolicy};
+    use openshell_core::policy::{FilesystemPolicy, LandlockPolicy, ProcessPolicy};
 
     #[test]
     fn proc_not_in_both_read_only_and_read_write_when_gpu_present() {
@@ -2621,7 +2620,7 @@ fn format_setting_value(es: &openshell_core::proto::EffectiveSetting) -> String 
 )]
 mod tests {
     use super::*;
-    use crate::policy::{FilesystemPolicy, LandlockPolicy, ProcessPolicy};
+    use openshell_core::policy::{FilesystemPolicy, LandlockPolicy, ProcessPolicy};
     #[cfg(unix)]
     use nix::unistd::{Group, User};
     #[cfg(unix)]

@@ -12,7 +12,7 @@
 //!    needed syscalls (`execveat+AT_EMPTY_PATH`, `unshare+CLONE_NEWUSER`,
 //!    `seccomp+SET_MODE_FILTER`)
 
-use crate::policy::{NetworkMode, SandboxPolicy};
+use openshell_core::policy::{NetworkMode, SandboxPolicy};
 use miette::{IntoDiagnostic, Result};
 use seccompiler::{
     SeccompAction, SeccompCmpArgLen, SeccompCmpOp, SeccompCondition, SeccompFilter, SeccompRule,

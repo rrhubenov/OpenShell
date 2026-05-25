@@ -3,7 +3,7 @@
 
 //! Platform sandboxing implementation.
 
-use crate::policy::SandboxPolicy;
+use openshell_core::policy::SandboxPolicy;
 use miette::Result;
 
 #[cfg(target_os = "linux")]
