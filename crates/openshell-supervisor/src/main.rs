@@ -15,7 +15,7 @@ use tracing_subscriber::EnvFilter;
 use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::{Layer, layer::SubscriberExt, util::SubscriberInitExt};
 
-use openshell_supervisor::run_sandbox;
+use openshell_supervisor::{SupervisorMode, run_sandbox};
 
 /// Subcommand name used to self-copy the supervisor binary into a shared volume.
 ///
@@ -105,6 +105,19 @@ struct Args {
     /// Port for health check endpoint.
     #[arg(long, default_value = "8080")]
     health_port: u16,
+
+    /// Which supervisor components to run.
+    ///
+    /// Accepts `network`, `process`, or `network,process` (the default and
+    /// today's combined behavior). Reserved for the upcoming split that lets
+    /// the network-side proxy and the process-side child supervisor run as
+    /// independent processes.
+    #[arg(
+        long,
+        env = "OPENSHELL_SUPERVISOR_MODE",
+        default_value = SupervisorMode::DEFAULT_STR,
+    )]
+    mode: SupervisorMode,
 }
 
 /// Copy the running executable to `dest`, creating parent directories as
@@ -306,6 +319,7 @@ fn main() -> Result<()> {
             args.health_check,
             args.health_port,
             args.inference_routes,
+            args.mode,
             ocsf_enabled,
         )
         .await
