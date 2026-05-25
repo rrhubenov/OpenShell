@@ -19,12 +19,15 @@ use tokio::sync::RwLock;
 pub const POLICY_LOCAL_HOST: &str = "policy.local";
 
 /// Filesystem path of the static agent guidance bundle inside the sandbox.
+///
 /// Single source of truth: the skill installer writes here, the L7 deny body
 /// references this path in `next_steps`, and the skill's own documentation
 /// renders the same path. Changing the location is a one-line update here.
 pub const SKILL_PATH: &str = "/etc/openshell/skills/policy_advisor.md";
 
-/// Routes served by the in-sandbox policy advisor API. Held in one place so
+/// Routes served by the in-sandbox policy advisor API.
+///
+/// Held in one place so
 /// the L7 deny `next_steps` array, the route dispatcher, the skill content,
 /// and tests all stay in sync — change the wire path here and every caller
 /// follows. See `agent_next_steps()` for the consumer that surfaces these
@@ -205,7 +208,9 @@ fn not_found_payload(path: &str) -> (u16, serde_json::Value) {
 }
 
 /// Build the `next_steps` array embedded in the L7 deny body so the agent has
-/// machine-readable pointers to this API. Centralizes the shape here to keep
+/// machine-readable pointers to this API.
+///
+/// Centralizes the shape here to keep
 /// the deny body and the actual route table from drifting — adding or
 /// renaming a route only requires touching the route constants above.
 ///

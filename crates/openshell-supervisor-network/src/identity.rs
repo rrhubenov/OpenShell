@@ -80,6 +80,10 @@ pub struct BinaryIdentityCache {
 }
 
 impl BinaryIdentityCache {
+    #[allow(
+        clippy::new_without_default,
+        reason = "Single explicit constructor is clearer than Default for an internal cache."
+    )]
     pub fn new() -> Self {
         Self {
             hashes: Mutex::new(HashMap::new()),

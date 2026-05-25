@@ -8,22 +8,18 @@
 pub mod bypass_monitor;
 mod child_env;
 pub mod debug_rpc;
-pub mod denial_aggregator;
-mod grpc_client;
-mod identity;
-pub mod l7;
 pub mod log_push;
-pub mod mechanistic_mapper;
-pub mod opa;
-mod policy_local;
 mod process;
 mod provider_credentials;
-pub mod proxy;
 mod sandbox;
-mod secrets;
 mod skills;
 mod ssh;
 mod supervisor_session;
+
+pub use openshell_supervisor_network::{
+    denial_aggregator, grpc_client, identity, l7, mechanistic_mapper, opa, policy_local, proxy,
+    secrets,
+};
 
 use miette::{IntoDiagnostic, Result};
 #[cfg(target_os = "linux")]
@@ -69,77 +65,6 @@ use openshell_ocsf::{
 // (`crate::ocsf_ctx()`, `crate::agent_proposals_enabled()`) compiling without
 // duplicating the storage.
 pub(crate) use openshell_core::ocsf_ctx::{agent_proposals_enabled, ocsf_ctx};
-
-/// Test-only helpers shared across sibling test modules.
-#[cfg(test)]
-pub(crate) mod test_helpers {
-    #![allow(
-        clippy::redundant_pub_crate,
-        reason = "intentional crate-private module"
-    )]
-    use std::sync::Arc;
-    use std::sync::LazyLock;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use tokio::sync::MutexGuard;
-
-    static PROPOSALS_FLAG_LOCK: LazyLock<tokio::sync::Mutex<()>> =
-        LazyLock::new(|| tokio::sync::Mutex::new(()));
-
-    /// Process-wide flag handle used by tests when the supervisor binary has
-    /// not initialized the global flag. Tests use [`ProposalsFlagGuard`] to
-    /// flip this value through a serialized async mutex; the guard restores
-    /// the previous value on drop.
-    static TEST_PROPOSALS_FLAG: LazyLock<Arc<AtomicBool>> =
-        LazyLock::new(|| Arc::new(AtomicBool::new(false)));
-
-    /// Guard for tests that toggle the process-wide agent-proposals flag.
-    /// Acquires a process-wide async mutex, swaps in the requested value, and
-    /// restores the previous value on drop. Hold the guard for the duration
-    /// of any code that reads `agent_proposals_enabled()`.
-    pub(crate) struct ProposalsFlagGuard {
-        prev: bool,
-        flag: Arc<AtomicBool>,
-        _lock: MutexGuard<'static, ()>,
-    }
-
-    impl ProposalsFlagGuard {
-        pub(crate) async fn set(enabled: bool) -> Self {
-            let lock = PROPOSALS_FLAG_LOCK.lock().await;
-            Self::with_lock(enabled, lock)
-        }
-
-        pub(crate) fn set_blocking(enabled: bool) -> Self {
-            let lock = PROPOSALS_FLAG_LOCK.blocking_lock();
-            Self::with_lock(enabled, lock)
-        }
-
-        fn with_lock(enabled: bool, lock: MutexGuard<'static, ()>) -> Self {
-            // Prefer the process-wide flag installed by `run_sandbox()` (when
-            // a binary-level test sets it). Otherwise fall back to a
-            // test-local flag that we initialize into core lazily so the
-            // shared `agent_proposals_enabled()` getter sees the same handle.
-            let flag = openshell_core::ocsf_ctx::agent_proposals_enabled_flag()
-                .cloned()
-                .unwrap_or_else(|| {
-                    let f = TEST_PROPOSALS_FLAG.clone();
-                    let _ = openshell_core::ocsf_ctx::init_agent_proposals_enabled(f.clone());
-                    f
-                });
-            let prev = flag.swap(enabled, Ordering::Relaxed);
-            Self {
-                prev,
-                flag,
-                _lock: lock,
-            }
-        }
-    }
-
-    impl Drop for ProposalsFlagGuard {
-        fn drop(&mut self) {
-            self.flag.store(self.prev, Ordering::Relaxed);
-        }
-    }
-}
 
 use crate::identity::BinaryIdentityCache;
 use crate::l7::tls::{
@@ -598,7 +523,7 @@ pub async fn run_sandbox(
             entrypoint_pid.clone(),
             tls_state,
             inference_ctx,
-            Some(provider_credentials.clone()),
+            provider_credentials.resolver(),
             Some(policy_local_ctx.clone()),
             denial_tx,
         )
