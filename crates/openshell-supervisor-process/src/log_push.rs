@@ -7,7 +7,7 @@
 //! channel to a background task. The task batches lines and streams them to
 //! the server using the `PushSandboxLogs` client-streaming RPC.
 
-use crate::grpc_client::CachedOpenShellClient;
+use crate::grpc_client::ProcessGrpcClient;
 use openshell_core::proto::{PushSandboxLogsRequest, SandboxLogLine};
 use tokio::sync::mpsc;
 use tracing::{Event, Subscriber};
@@ -124,7 +124,7 @@ async fn run_push_loop(
         attempt += 1;
 
         // --- Connect ---
-        let client = match CachedOpenShellClient::connect(&endpoint).await {
+        let client = match ProcessGrpcClient::connect(&endpoint).await {
             Ok(c) => {
                 if attempt > 1 {
                     eprintln!("openshell: log push reconnected (attempt {attempt})");

@@ -5,15 +5,10 @@
 //!
 //! This crate provides process sandboxing and monitoring capabilities.
 
-pub mod bypass_monitor;
-mod child_env;
 pub mod debug_rpc;
-pub mod log_push;
-mod process;
-mod provider_credentials;
-mod sandbox;
-mod skills;
-mod ssh;
+pub use openshell_supervisor_process::{
+    bypass_monitor, child_env, log_push, process, provider_credentials, sandbox, skills, ssh,
+};
 mod supervisor_session;
 
 pub use openshell_supervisor_network::{
@@ -22,14 +17,8 @@ pub use openshell_supervisor_network::{
 };
 
 use miette::{IntoDiagnostic, Result};
-#[cfg(target_os = "linux")]
-use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
-#[cfg(any(target_os = "linux", test))]
-use std::sync::LazyLock;
-#[cfg(any(target_os = "linux", test))]
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 use tokio::time::timeout;
@@ -72,10 +61,10 @@ use crate::l7::tls::{
     write_ca_files,
 };
 use crate::opa::OpaEngine;
-use openshell_core::policy::{NetworkMode, NetworkPolicy, ProxyPolicy, SandboxPolicy};
 use crate::proxy::ProxyHandle;
 #[cfg(target_os = "linux")]
 use crate::sandbox::linux::netns::NetworkNamespace;
+use openshell_core::policy::{NetworkMode, NetworkPolicy, ProxyPolicy, SandboxPolicy};
 pub use process::{ProcessHandle, ProcessStatus};
 pub use sandbox::apply_supervisor_startup_hardening;
 
@@ -137,40 +126,8 @@ fn route_refresh_interval_secs() -> u64 {
 }
 
 #[cfg(target_os = "linux")]
-static MANAGED_CHILDREN: LazyLock<Mutex<HashSet<i32>>> =
-    LazyLock::new(|| Mutex::new(HashSet::new()));
-
-#[cfg(target_os = "linux")]
-pub(crate) fn register_managed_child(pid: u32) {
-    let Ok(pid) = i32::try_from(pid) else {
-        return;
-    };
-    if pid <= 0 {
-        return;
-    }
-    if let Ok(mut children) = MANAGED_CHILDREN.lock() {
-        children.insert(pid);
-    }
-}
-
-#[cfg(target_os = "linux")]
-pub(crate) fn unregister_managed_child(pid: u32) {
-    let Ok(pid) = i32::try_from(pid) else {
-        return;
-    };
-    if pid <= 0 {
-        return;
-    }
-    if let Ok(mut children) = MANAGED_CHILDREN.lock() {
-        children.remove(&pid);
-    }
-}
-
-#[cfg(target_os = "linux")]
 fn is_managed_child(pid: i32) -> bool {
-    MANAGED_CHILDREN
-        .lock()
-        .is_ok_and(|children| children.contains(&pid))
+    openshell_supervisor_process::managed_children::is_managed_child(pid)
 }
 
 /// Run a command in the sandbox.
@@ -2545,12 +2502,14 @@ fn format_setting_value(es: &openshell_core::proto::EffectiveSetting) -> String 
 )]
 mod tests {
     use super::*;
-    use openshell_core::policy::{FilesystemPolicy, LandlockPolicy, ProcessPolicy};
     #[cfg(unix)]
     use nix::unistd::{Group, User};
+    use openshell_core::policy::{FilesystemPolicy, LandlockPolicy, ProcessPolicy};
     #[cfg(unix)]
     use std::os::unix::fs::{MetadataExt, symlink};
     use temp_env::with_vars;
+
+    use std::sync::{LazyLock, Mutex};
 
     static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 

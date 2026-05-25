@@ -602,9 +602,12 @@ mod tests {
     #[test]
     fn resolver_rejects_secret_with_crlf() {
         let (_, resolver) = SecretResolver::from_provider_env(
-            [("INJECTED".to_string(), "value\r\nX-Header: leak".to_string())]
-                .into_iter()
-                .collect(),
+            [(
+                "INJECTED".to_string(),
+                "value\r\nX-Header: leak".to_string(),
+            )]
+            .into_iter()
+            .collect(),
         );
         let resolver = resolver.expect("resolver");
         assert_eq!(

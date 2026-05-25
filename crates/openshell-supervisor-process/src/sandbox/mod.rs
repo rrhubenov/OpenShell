@@ -3,8 +3,8 @@
 
 //! Platform sandboxing implementation.
 
-use openshell_core::policy::SandboxPolicy;
 use miette::Result;
+use openshell_core::policy::SandboxPolicy;
 
 #[cfg(target_os = "linux")]
 pub mod linux;

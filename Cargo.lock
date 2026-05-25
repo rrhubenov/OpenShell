@@ -3732,6 +3732,7 @@ dependencies = [
  "openshell-policy",
  "openshell-router",
  "openshell-supervisor-network",
+ "openshell-supervisor-process",
  "rand_core 0.6.4",
  "rcgen",
  "regorus",
@@ -3797,6 +3798,34 @@ dependencies = [
  "tracing",
  "uuid",
  "webpki-roots 1.0.7",
+]
+
+[[package]]
+name = "openshell-supervisor-process"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "landlock",
+ "libc",
+ "miette",
+ "nix",
+ "openshell-core",
+ "openshell-ocsf",
+ "rand_core 0.6.4",
+ "russh",
+ "rustix 1.1.4",
+ "seccompiler",
+ "serde",
+ "serde_json",
+ "temp-env",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

@@ -8,8 +8,8 @@ pub mod netns;
 mod nft_ruleset;
 mod seccomp;
 
-use openshell_core::policy::SandboxPolicy;
 use miette::Result;
+use openshell_core::policy::SandboxPolicy;
 use std::path::PathBuf;
 use std::sync::Once;
 

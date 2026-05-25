@@ -4,15 +4,15 @@
 //! Process management and signal handling.
 
 use crate::child_env;
-use openshell_core::policy::{NetworkMode, SandboxPolicy};
+#[cfg(target_os = "linux")]
+use crate::managed_children::{register_managed_child, unregister_managed_child};
 use crate::sandbox;
 #[cfg(target_os = "linux")]
 use crate::sandbox::linux::netns::NetworkNamespace;
-#[cfg(target_os = "linux")]
-use crate::{register_managed_child, unregister_managed_child};
 use miette::{IntoDiagnostic, Result};
 use nix::sys::signal::{self, Signal};
 use nix::unistd::{Group, Pid, User};
+use openshell_core::policy::{NetworkMode, SandboxPolicy};
 use std::collections::HashMap;
 use std::ffi::CString;
 #[cfg(target_os = "linux")]
@@ -593,13 +593,13 @@ impl From<std::process::ExitStatus> for ProcessStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use openshell_core::policy::{
-        FilesystemPolicy, LandlockPolicy, NetworkPolicy, ProcessPolicy, SandboxPolicy,
-    };
     #[cfg(unix)]
     use nix::sys::wait::{WaitStatus, waitpid};
     #[cfg(unix)]
     use nix::unistd::{ForkResult, fork};
+    use openshell_core::policy::{
+        FilesystemPolicy, LandlockPolicy, NetworkPolicy, ProcessPolicy, SandboxPolicy,
+    };
     #[cfg(unix)]
     use std::mem::size_of;
     use std::process::Stdio as StdStdio;

@@ -20,6 +20,7 @@ openshell-ocsf = { path = "../openshell-ocsf" }
 openshell-policy = { path = "../openshell-policy" }
 openshell-router = { path = "../openshell-router" }
 openshell-supervisor-network = { path = "../openshell-supervisor-network" }
+openshell-supervisor-process = { path = "../openshell-supervisor-process" }
 
 # Async runtime
 tokio = { workspace = true }

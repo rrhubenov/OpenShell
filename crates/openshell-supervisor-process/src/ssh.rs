@@ -4,14 +4,14 @@
 //! Embedded SSH server for sandbox access.
 
 use crate::child_env;
-use openshell_core::policy::SandboxPolicy;
+#[cfg(target_os = "linux")]
+use crate::managed_children::{register_managed_child, unregister_managed_child};
 use crate::process::drop_privileges;
 use crate::sandbox;
-#[cfg(target_os = "linux")]
-use crate::{register_managed_child, unregister_managed_child};
 use miette::{IntoDiagnostic, Result};
 use nix::pty::{Winsize, openpty};
 use nix::unistd::setsid;
+use openshell_core::policy::SandboxPolicy;
 use openshell_ocsf::{
     ActionId, ActivityId, DispositionId, SeverityId, SshActivityBuilder, StatusId, ocsf_emit,
 };
@@ -96,7 +96,11 @@ fn ssh_server_init(
     Ok((listener, config, ca_paths))
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    clippy::implicit_hasher,
+    reason = "All call sites use the default hasher; generalising would churn signatures for no benefit."
+)]
 pub async fn run_ssh_server(
     listen_path: PathBuf,
     ready_tx: tokio::sync::oneshot::Sender<Result<()>>,

@@ -1,0 +1,56 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "openshell-supervisor-process"
+description = "OpenShell supervisor process component (sandbox isolation, SSH, child supervision)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+openshell-core = { path = "../openshell-core" }
+openshell-ocsf = { path = "../openshell-ocsf" }
+
+# Async runtime
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+
+# gRPC
+tonic = { workspace = true, features = ["channel", "tls"] }
+
+# Error handling
+miette = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# SSH server
+russh = "0.57"
+rand_core = "0.6"
+
+# Process control
+nix = { workspace = true }
+rustix = { workspace = true }
+
+# Serialization / logging
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock = "0.4"
+seccompiler = "0.5"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tempfile = "3"
+temp-env = "0.3"
+
+[lints]
+workspace = true
