@@ -18,7 +18,6 @@ pub mod opa;
 mod policy;
 mod policy_local;
 mod process;
-pub mod procfs;
 mod provider_credentials;
 pub mod proxy;
 mod sandbox;
@@ -30,13 +29,12 @@ mod supervisor_session;
 use miette::{IntoDiagnostic, Result};
 #[cfg(target_os = "linux")]
 use std::collections::HashSet;
-use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
+#[cfg(any(target_os = "linux", test))]
 use std::sync::LazyLock;
 #[cfg(any(target_os = "linux", test))]
 use std::sync::Mutex;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 use tokio::time::timeout;
@@ -67,49 +65,11 @@ use openshell_ocsf::{
 // policy changes, or observable sandbox behavior worth structuring.
 // ---------------------------------------------------------------------------
 
-/// Process-wide OCSF sandbox context. Initialized once during `run_sandbox()`
-/// startup and accessible from any module in the crate via [`ocsf_ctx()`].
-static OCSF_CTX: OnceLock<SandboxContext> = OnceLock::new();
-
-/// Fallback context used when `OCSF_CTX` has not been initialized (e.g. in
-/// unit tests that exercise individual functions without calling `run_sandbox`).
-static OCSF_CTX_FALLBACK: LazyLock<SandboxContext> = LazyLock::new(|| SandboxContext {
-    sandbox_id: String::new(),
-    sandbox_name: String::new(),
-    container_image: String::new(),
-    hostname: "test".to_string(),
-    product_version: openshell_core::VERSION.to_string(),
-    proxy_ip: std::net::IpAddr::from([127, 0, 0, 1]),
-    proxy_port: 3128,
-});
-
-/// Return a reference to the process-wide [`SandboxContext`].
-///
-/// Falls back to a default context if `run_sandbox()` has not yet been called
-/// (e.g. during unit tests).
-pub(crate) fn ocsf_ctx() -> &'static SandboxContext {
-    OCSF_CTX.get().unwrap_or(&OCSF_CTX_FALLBACK)
-}
-
-/// Process-wide flag for the agent-driven policy proposal surface.
-/// Set once during `run_sandbox()` startup and updated by the settings poll
-/// loop when `agent_policy_proposals_enabled` changes. Read by the
-/// `policy.local` route handler and the L7 deny body's `next_steps` builder
-/// to gate the agent-controlled mutation surface. Exposed `pub(crate)` so
-/// unit tests in sibling modules can flip the flag through a serialized
-/// guard (see `policy_local::tests::ProposalsFlagGuard`).
-pub(crate) static AGENT_PROPOSALS_ENABLED: OnceLock<Arc<std::sync::atomic::AtomicBool>> =
-    OnceLock::new();
-
-/// Read the current value of the agent proposals feature flag.
-///
-/// Returns `false` if `run_sandbox()` has not initialized the flag (e.g.
-/// during unit tests), matching the documented default for the setting.
-pub(crate) fn agent_proposals_enabled() -> bool {
-    AGENT_PROPOSALS_ENABLED
-        .get()
-        .is_some_and(|flag| flag.load(Ordering::Relaxed))
-}
+// The process-wide OCSF context and the agent-proposals feature flag now live
+// in `openshell_core::ocsf_ctx`. These re-exports keep the existing call sites
+// (`crate::ocsf_ctx()`, `crate::agent_proposals_enabled()`) compiling without
+// duplicating the storage.
+pub(crate) use openshell_core::ocsf_ctx::{agent_proposals_enabled, ocsf_ctx};
 
 /// Test-only helpers shared across sibling test modules.
 #[cfg(test)]
@@ -126,11 +86,17 @@ pub(crate) mod test_helpers {
     static PROPOSALS_FLAG_LOCK: LazyLock<tokio::sync::Mutex<()>> =
         LazyLock::new(|| tokio::sync::Mutex::new(()));
 
-    /// Guard for tests that toggle the process-wide
-    /// `AGENT_PROPOSALS_ENABLED` flag. Acquires a process-wide async mutex,
-    /// swaps in the requested value, and restores the previous value on drop.
-    /// Hold the guard for the duration of any code that reads
-    /// `agent_proposals_enabled()`.
+    /// Process-wide flag handle used by tests when the supervisor binary has
+    /// not initialized the global flag. Tests use [`ProposalsFlagGuard`] to
+    /// flip this value through a serialized async mutex; the guard restores
+    /// the previous value on drop.
+    static TEST_PROPOSALS_FLAG: LazyLock<Arc<AtomicBool>> =
+        LazyLock::new(|| Arc::new(AtomicBool::new(false)));
+
+    /// Guard for tests that toggle the process-wide agent-proposals flag.
+    /// Acquires a process-wide async mutex, swaps in the requested value, and
+    /// restores the previous value on drop. Hold the guard for the duration
+    /// of any code that reads `agent_proposals_enabled()`.
     pub(crate) struct ProposalsFlagGuard {
         prev: bool,
         flag: Arc<AtomicBool>,
@@ -149,9 +115,17 @@ pub(crate) mod test_helpers {
         }
 
         fn with_lock(enabled: bool, lock: MutexGuard<'static, ()>) -> Self {
-            let flag = super::AGENT_PROPOSALS_ENABLED
-                .get_or_init(|| Arc::new(AtomicBool::new(false)))
-                .clone();
+            // Prefer the process-wide flag installed by `run_sandbox()` (when
+            // a binary-level test sets it). Otherwise fall back to a
+            // test-local flag that we initialize into core lazily so the
+            // shared `agent_proposals_enabled()` getter sees the same handle.
+            let flag = openshell_core::ocsf_ctx::agent_proposals_enabled_flag()
+                .cloned()
+                .unwrap_or_else(|| {
+                    let f = TEST_PROPOSALS_FLAG.clone();
+                    let _ = openshell_core::ocsf_ctx::init_agent_proposals_enabled(f.clone());
+                    f
+                });
             let prev = flag.swap(enabled, Ordering::Relaxed);
             Self {
                 prev,
@@ -311,17 +285,16 @@ pub async fn run_sandbox(
             |s| s.trim().to_string(),
         );
 
-        if OCSF_CTX
-            .set(SandboxContext {
-                sandbox_id: sandbox_id.clone().unwrap_or_default(),
-                sandbox_name: sandbox.as_deref().unwrap_or_default().to_string(),
-                container_image: std::env::var("OPENSHELL_CONTAINER_IMAGE").unwrap_or_default(),
-                hostname,
-                product_version: openshell_core::VERSION.to_string(),
-                proxy_ip: std::net::IpAddr::from([127, 0, 0, 1]),
-                proxy_port: 3128,
-            })
-            .is_err()
+        if openshell_core::ocsf_ctx::init_ocsf_ctx(SandboxContext {
+            sandbox_id: sandbox_id.clone().unwrap_or_default(),
+            sandbox_name: sandbox.as_deref().unwrap_or_default().to_string(),
+            container_image: std::env::var("OPENSHELL_CONTAINER_IMAGE").unwrap_or_default(),
+            hostname,
+            product_version: openshell_core::VERSION.to_string(),
+            proxy_ip: std::net::IpAddr::from([127, 0, 0, 1]),
+            proxy_port: 3128,
+        })
+        .is_err()
         {
             debug!("OCSF context already initialized, keeping existing");
         }
@@ -419,10 +392,7 @@ pub async fn run_sandbox(
     // gates the skill install, the policy.local route handler, and the L7
     // deny body's `next_steps` field — see `agent_proposals_enabled()`.
     let proposals_enabled = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    if AGENT_PROPOSALS_ENABLED
-        .set(proposals_enabled.clone())
-        .is_err()
-    {
+    if openshell_core::ocsf_ctx::init_agent_proposals_enabled(proposals_enabled.clone()).is_err() {
         debug!("agent proposals flag already initialized, keeping existing");
     }
 
@@ -1853,67 +1823,10 @@ mod baseline_tests {
     }
 }
 
-/// Returns `true` if the error is transient and worth retrying.
-///
-/// Walks the `miette::Report` error chain looking for a `tonic::Status`. If
-/// found, only the gRPC codes that represent transient failures are retryable.
-/// If no `tonic::Status` is present (e.g. a raw connection error), assume the
-/// failure is transient.
-fn is_retryable_error(err: &miette::Report) -> bool {
-    let mut source: Option<&dyn std::error::Error> = Some(err.as_ref());
-    while let Some(e) = source {
-        if let Some(status) = e.downcast_ref::<tonic::Status>() {
-            return matches!(
-                status.code(),
-                tonic::Code::Unavailable
-                    | tonic::Code::DeadlineExceeded
-                    | tonic::Code::ResourceExhausted
-                    | tonic::Code::Aborted
-                    | tonic::Code::Internal
-                    | tonic::Code::Unknown
-            );
-        }
-        source = e.source();
-    }
-    true
-}
-
-/// Retry a gRPC operation with exponential backoff (capped at 4 s).
-///
-/// Non-transient gRPC errors (e.g. `NOT_FOUND`, `INVALID_ARGUMENT`,
-/// `PERMISSION_DENIED`) are returned immediately without retrying.
-async fn grpc_retry<T, F, Fut>(op_name: &str, f: F) -> Result<T>
-where
-    F: Fn() -> Fut,
-    Fut: Future<Output = Result<T>>,
-{
-    let mut last_err = None;
-    for attempt in 1..=5u32 {
-        match f().await {
-            Ok(val) => return Ok(val),
-            Err(e) => {
-                if !is_retryable_error(&e) {
-                    return Err(e);
-                }
-                if attempt < 5 {
-                    warn!(
-                        attempt,
-                        max_attempts = 5,
-                        error = %e,
-                        "{op_name} failed, retrying"
-                    );
-                    let backoff = Duration::from_secs((1u64 << (attempt - 1)).min(4));
-                    tokio::time::sleep(backoff).await;
-                }
-                last_err = Some(e);
-            }
-        }
-    }
-    Err(miette::miette!(
-        "{op_name} failed after 5 attempts: {}",
-        last_err.expect("loop executed at least once")
-    ))
-}
+/// Re-export shared gRPC retry helpers from core. The retry helpers (and the
+/// `tonic::Status` classification they encode) are used by the proxy and
+/// supervisor poll loops alike, so they live in `openshell-core`.
+use openshell_core::grpc_retry::grpc_retry;
 
 /// Load sandbox policy from local files or gRPC.
 ///
@@ -2575,7 +2488,7 @@ async fn run_policy_poll_loop(ctx: PolicyPollLoopContext) -> Result<()> {
         // because route_request and agent_next_steps both gate on the live
         // atomic, so the agent that reads the skill will see 404s and an
         // empty `next_steps` array regardless.
-        if let Some(flag) = AGENT_PROPOSALS_ENABLED.get() {
+        if let Some(flag) = openshell_core::ocsf_ctx::agent_proposals_enabled_flag() {
             let new_proposals = extract_bool_setting(
                 &result.settings,
                 openshell_core::settings::AGENT_POLICY_PROPOSALS_ENABLED_KEY,

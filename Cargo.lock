@@ -3457,17 +3457,23 @@ dependencies = [
 name = "openshell-core"
 version = "0.0.0"
 dependencies = [
+ "hex",
  "ipnet",
+ "libc",
  "miette",
+ "openshell-ocsf",
  "prost",
  "prost-types",
  "protobuf-src",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.18",
+ "tokio",
  "tonic",
  "tonic-build",
+ "tracing",
  "url",
 ]
 

@@ -295,7 +295,7 @@ pub fn spawn(
 fn resolve_process_identity(entrypoint_pid: u32, src_port: u16) -> (String, String, String) {
     #[cfg(target_os = "linux")]
     {
-        use crate::procfs;
+        use openshell_core::procfs;
 
         match procfs::resolve_tcp_peer_socket_owners(entrypoint_pid, src_port) {
             Ok(socket_owners) => {
