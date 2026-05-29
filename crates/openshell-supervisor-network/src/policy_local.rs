@@ -4,6 +4,7 @@
 //! Sandbox-local policy advisor HTTP API.
 
 use miette::{IntoDiagnostic, Result};
+use openshell_core::grpc::AuthedChannel;
 use openshell_core::proto::{
     L7Allow, L7DenyRule, L7Rule, NetworkBinary, NetworkEndpoint, NetworkPolicyRule, PolicyChunk,
     SandboxPolicy as ProtoSandboxPolicy,
@@ -81,7 +82,7 @@ const MAX_DENIAL_LINE_BYTES: usize = 4096;
 #[derive(Debug)]
 pub struct PolicyLocalContext {
     current_policy: Arc<RwLock<Option<ProtoSandboxPolicy>>>,
-    gateway_endpoint: Option<String>,
+    gateway_channel: Option<AuthedChannel>,
     sandbox_name: Option<String>,
     shorthand_log_dir: PathBuf,
 }
@@ -89,12 +90,12 @@ pub struct PolicyLocalContext {
 impl PolicyLocalContext {
     pub fn new(
         current_policy: Option<ProtoSandboxPolicy>,
-        gateway_endpoint: Option<String>,
+        gateway_channel: Option<AuthedChannel>,
         sandbox_name: Option<String>,
     ) -> Self {
         Self::with_log_dir(
             current_policy,
-            gateway_endpoint,
+            gateway_channel,
             sandbox_name,
             PathBuf::from(LOG_DIR),
         )
@@ -102,13 +103,13 @@ impl PolicyLocalContext {
 
     fn with_log_dir(
         current_policy: Option<ProtoSandboxPolicy>,
-        gateway_endpoint: Option<String>,
+        gateway_channel: Option<AuthedChannel>,
         sandbox_name: Option<String>,
         shorthand_log_dir: PathBuf,
     ) -> Self {
         Self {
             current_policy: Arc::new(RwLock::new(current_policy)),
-            gateway_endpoint,
+            gateway_channel,
             sandbox_name,
             shorthand_log_dir,
         }
@@ -450,7 +451,7 @@ fn collect_shorthand_log_files(log_dir: &Path, max_files: usize) -> std::io::Res
 }
 
 async fn submit_proposal(ctx: &PolicyLocalContext, body: &[u8]) -> (u16, serde_json::Value) {
-    let Some(endpoint) = ctx.gateway_endpoint.as_deref() else {
+    let Some(channel) = ctx.gateway_channel.clone() else {
         return (
             503,
             serde_json::json!({
@@ -479,18 +480,7 @@ async fn submit_proposal(ctx: &PolicyLocalContext, body: &[u8]) -> (u16, serde_j
         Err(error) => return (400, error_payload("invalid_proposal", error)),
     };
 
-    let client = match crate::grpc_client::CachedOpenShellClient::connect(endpoint).await {
-        Ok(client) => client,
-        Err(error) => {
-            return (
-                502,
-                serde_json::json!({
-                    "error": "gateway_connect_failed",
-                    "detail": error.to_string()
-                }),
-            );
-        }
-    };
+    let client = crate::grpc_client::CachedOpenShellClient::new(channel);
 
     // Pre-compute the audit summaries before handing `chunks` to the
     // gateway client (which consumes the vec). The summaries pair up with
@@ -668,7 +658,7 @@ async fn proposal_status_response(
     ctx: &PolicyLocalContext,
     chunk_id: &str,
 ) -> (u16, serde_json::Value) {
-    let session = match open_lookup_session(ctx).await {
+    let session = match open_lookup_session(ctx) {
         Ok(session) => session,
         Err(err) => return err,
     };
@@ -685,7 +675,7 @@ async fn proposal_wait_response(
     chunk_id: &str,
     query: &str,
 ) -> (u16, serde_json::Value) {
-    let session = match open_lookup_session(ctx).await {
+    let session = match open_lookup_session(ctx) {
         Ok(session) => session,
         Err(err) => return err,
     };
@@ -878,10 +868,10 @@ struct LookupSession<'a> {
 
 /// Validate ctx and open one gateway channel. Failures map to the canonical
 /// error payload shape used by both `/proposals/{id}` and `/wait`.
-async fn open_lookup_session(
+fn open_lookup_session(
     ctx: &PolicyLocalContext,
 ) -> std::result::Result<LookupSession<'_>, (u16, serde_json::Value)> {
-    let endpoint = ctx.gateway_endpoint.as_deref().ok_or_else(|| {
+    let channel = ctx.gateway_channel.clone().ok_or_else(|| {
         (
             503,
             error_payload(
@@ -904,9 +894,7 @@ async fn open_lookup_session(
                 ),
             )
         })?;
-    let client = crate::grpc_client::CachedOpenShellClient::connect(endpoint)
-        .await
-        .map_err(|e| (502, error_payload("gateway_connect_failed", e.to_string())))?;
+    let client = crate::grpc_client::CachedOpenShellClient::new(channel);
     Ok(LookupSession {
         client,
         sandbox_name,

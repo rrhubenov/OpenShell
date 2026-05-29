@@ -215,12 +215,23 @@ fn main() -> Result<()> {
         // Install rustls crypto provider before any TLS connections (including log push).
         let _ = rustls::crypto::ring::default_provider().install_default();
 
+        // Build the gateway channel once at process startup. Every subsystem
+        // (log push, supervisor session, policy poll, denial aggregator,
+        // policy_local) shares this channel — one TCP/TLS handshake, one
+        // token slot, one renewal loop.
+        let gateway_channel: Option<openshell_core::grpc::AuthedChannel> =
+            if let Some(endpoint) = args.openshell_endpoint.as_deref() {
+                Some(openshell_core::grpc::connect_authed_channel(endpoint).await?)
+            } else {
+                None
+            };
+
         // Set up optional log push layer (gRPC mode only).
-        let log_push_state = if let (Some(sandbox_id), Some(endpoint)) =
-            (&args.sandbox_id, &args.openshell_endpoint)
+        let log_push_state = if let (Some(sandbox_id), Some(channel)) =
+            (&args.sandbox_id, gateway_channel.as_ref())
         {
             let (tx, handle) = openshell_supervisor::log_push::spawn_log_push_task(
-                endpoint.clone(),
+                channel.clone(),
                 sandbox_id.clone(),
             );
             let layer = openshell_supervisor::log_push::LogPushLayer::new(sandbox_id.clone(), tx);
@@ -312,7 +323,6 @@ fn main() -> Result<()> {
             args.interactive,
             args.sandbox_id,
             args.sandbox,
-            args.openshell_endpoint,
             args.policy_rules,
             args.policy_data,
             args.ssh_socket_path,
@@ -321,6 +331,7 @@ fn main() -> Result<()> {
             args.inference_routes,
             args.mode,
             ocsf_enabled,
+            gateway_channel,
         )
         .await
     })?;

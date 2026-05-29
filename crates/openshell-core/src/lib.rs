@@ -16,6 +16,7 @@ pub mod driver_utils;
 pub mod error;
 pub mod forward;
 pub mod gpu;
+pub mod grpc;
 pub mod grpc_retry;
 pub mod image;
 pub mod inference;

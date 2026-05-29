@@ -15,6 +15,7 @@ use std::net::IpAddr;
 use std::os::fd::RawFd;
 use std::time::Duration;
 
+use openshell_core::grpc::AuthedChannel;
 use openshell_core::proto::open_shell_client::OpenShellClient;
 use openshell_core::proto::{
     GatewayMessage, RelayFrame, RelayInit, RelayOpen, RelayOpenResult, SupervisorHeartbeat,
@@ -29,8 +30,6 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
 use tracing::{debug, warn};
-
-use crate::grpc_client;
 
 const INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
@@ -231,13 +230,13 @@ fn map_stream_message<T>(
 /// The task runs for the lifetime of the sandbox process, reconnecting with
 /// exponential backoff on failures.
 pub fn spawn(
-    endpoint: String,
+    channel: AuthedChannel,
     sandbox_id: String,
     ssh_socket_path: std::path::PathBuf,
     netns_fd: Option<i32>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(run_session_loop(
-        endpoint,
+        channel,
         sandbox_id,
         ssh_socket_path,
         netns_fd,
@@ -245,26 +244,35 @@ pub fn spawn(
 }
 
 async fn run_session_loop(
-    endpoint: String,
+    channel: AuthedChannel,
     sandbox_id: String,
     ssh_socket_path: std::path::PathBuf,
     netns_fd: Option<i32>,
 ) {
     let mut backoff = INITIAL_BACKOFF;
     let mut attempt: u64 = 0;
+    // The OCSF events historically carried the gateway endpoint string. Now
+    // that the channel is owned by the orchestrator, callers no longer have
+    // a stable endpoint label to pass in — use a placeholder. The connection
+    // identity is implicit in the supervisor's single AuthedChannel.
+    let endpoint_label = "gateway";
 
     loop {
         attempt += 1;
 
-        match run_single_session(&endpoint, &sandbox_id, &ssh_socket_path, netns_fd).await {
+        match run_single_session(&channel, &sandbox_id, &ssh_socket_path, netns_fd).await {
             Ok(()) => {
-                let event = session_closed_event(crate::ocsf_ctx(), &endpoint, &sandbox_id);
+                let event = session_closed_event(crate::ocsf_ctx(), endpoint_label, &sandbox_id);
                 ocsf_emit!(event);
                 break;
             }
             Err(e) => {
-                let event =
-                    session_failed_event(crate::ocsf_ctx(), &endpoint, attempt, &e.to_string());
+                let event = session_failed_event(
+                    crate::ocsf_ctx(),
+                    endpoint_label,
+                    attempt,
+                    &e.to_string(),
+                );
                 ocsf_emit!(event);
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(MAX_BACKOFF);
@@ -274,18 +282,15 @@ async fn run_session_loop(
 }
 
 async fn run_single_session(
-    endpoint: &str,
+    channel: &AuthedChannel,
     sandbox_id: &str,
     ssh_socket_path: &std::path::Path,
     netns_fd: Option<i32>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // Connect to the gateway. The same `Channel` is used for both the
-    // long-lived control stream and all data-plane `RelayStream` calls, so
-    // every relay rides the same TCP+TLS+HTTP/2 connection — no new TLS
-    // handshake per relay.
-    let channel = grpc_client::connect_channel_pub(endpoint)
-        .await
-        .map_err(|e| format!("connect failed: {e}"))?;
+    // The supplied `AuthedChannel` is shared with every other gRPC consumer in
+    // the supervisor, so the long-lived control stream and all data-plane
+    // `RelayStream` calls multiplex over the same TCP+TLS+HTTP/2 connection —
+    // no new TLS handshake per relay.
     let mut client = OpenShellClient::new(channel.clone());
 
     // Create the outbound message stream.
@@ -327,7 +332,7 @@ async fn run_single_session(
     let heartbeat_secs = accepted.heartbeat_interval_secs.max(5);
     let event = session_established_event(
         crate::ocsf_ctx(),
-        endpoint,
+        "gateway",
         &accepted.session_id,
         heartbeat_secs,
     );
@@ -347,7 +352,7 @@ async fn run_single_session(
                     sandbox_id,
                     ssh_socket_path,
                     netns_fd,
-                    &channel,
+                    channel,
                     &tx,
                 );
             }
@@ -370,7 +375,7 @@ fn handle_gateway_message(
     sandbox_id: &str,
     ssh_socket_path: &std::path::Path,
     netns_fd: Option<i32>,
-    channel: &grpc_client::AuthedChannel,
+    channel: &AuthedChannel,
     tx: &mpsc::Sender<SupervisorMessage>,
 ) {
     match &msg.payload {
@@ -435,7 +440,7 @@ async fn handle_relay_open(
     relay_open: RelayOpen,
     ssh_socket_path: &std::path::Path,
     netns_fd: Option<i32>,
-    channel: grpc_client::AuthedChannel,
+    channel: AuthedChannel,
     tx: mpsc::Sender<SupervisorMessage>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let channel_id = relay_open.channel_id.clone();

@@ -20,8 +20,8 @@ openshell-router = { path = "../openshell-router" }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
 
-# gRPC
-tonic = { workspace = true, features = ["channel", "tls"] }
+# gRPC (TLS handled in openshell-core::grpc)
+tonic = { workspace = true, features = ["channel"] }
 
 # Error handling
 miette = { workspace = true }

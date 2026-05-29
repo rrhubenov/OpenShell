@@ -19,12 +19,11 @@
 
 use base64::Engine as _;
 use miette::{IntoDiagnostic, Result, WrapErr};
+use openshell_core::grpc::{AuthedChannel, connect_authed_channel};
 use openshell_core::proto::{
     GetSandboxConfigRequest, RefreshSandboxTokenRequest, open_shell_client::OpenShellClient,
 };
 use sha2::{Digest, Sha256};
-
-use crate::grpc_client::{AuthedChannel, connect_channel_pub};
 
 /// Entry point for the `debug-rpc` subcommand. Returns the process exit
 /// code; `main` propagates it.
@@ -66,7 +65,7 @@ async fn open_client() -> Result<OpenShellClient<AuthedChannel>> {
     let endpoint = std::env::var(openshell_core::sandbox_env::ENDPOINT)
         .into_diagnostic()
         .wrap_err("OPENSHELL_ENDPOINT must be set")?;
-    let channel = connect_channel_pub(&endpoint).await?;
+    let channel = connect_authed_channel(&endpoint).await?;
     Ok(OpenShellClient::new(channel))
 }
 

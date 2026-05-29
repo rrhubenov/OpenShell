@@ -8,6 +8,7 @@
 //! the server using the `PushSandboxLogs` client-streaming RPC.
 
 use crate::grpc_client::ProcessGrpcClient;
+use openshell_core::grpc::AuthedChannel;
 use openshell_core::proto::{PushSandboxLogsRequest, SandboxLogLine};
 use tokio::sync::mpsc;
 use tracing::{Event, Subscriber};
@@ -93,25 +94,27 @@ impl<S: Subscriber> Layer<S> for LogPushLayer {
 ///
 /// Returns the sender half of the channel (for the [`LogPushLayer`]) and the
 /// task handle. The task runs until the sender is dropped or the gRPC stream
-/// breaks.
+/// breaks. The supplied [`AuthedChannel`] is owned by the orchestrator and
+/// auto-reconnects under the hood, so this task only retries the streaming
+/// RPC — it never rebuilds the channel.
 pub fn spawn_log_push_task(
-    endpoint: String,
+    channel: AuthedChannel,
     sandbox_id: String,
 ) -> (mpsc::Sender<SandboxLogLine>, tokio::task::JoinHandle<()>) {
     let (tx, rx) = mpsc::channel::<SandboxLogLine>(1024);
 
-    let handle = tokio::spawn(run_push_loop(endpoint, sandbox_id, rx));
+    let handle = tokio::spawn(run_push_loop(channel, sandbox_id, rx));
 
     (tx, handle)
 }
 
-/// Maximum backoff delay between reconnection attempts.
+/// Maximum backoff delay between streaming-RPC retry attempts.
 const MAX_BACKOFF: tokio::time::Duration = tokio::time::Duration::from_secs(30);
-/// Initial backoff delay after a connection failure.
+/// Initial backoff delay after a streaming-RPC failure.
 const INITIAL_BACKOFF: tokio::time::Duration = tokio::time::Duration::from_secs(1);
 
 async fn run_push_loop(
-    endpoint: String,
+    channel: AuthedChannel,
     sandbox_id: String,
     mut rx: mpsc::Receiver<SandboxLogLine>,
 ) {
@@ -119,28 +122,16 @@ async fn run_push_loop(
     let mut backoff = INITIAL_BACKOFF;
     let mut attempt: u64 = 0;
 
-    // Outer reconnect loop — runs for the entire sandbox lifetime.
+    let client = ProcessGrpcClient::new(channel);
+
+    // Outer retry loop — runs for the entire sandbox lifetime, retrying the
+    // streaming RPC if it ever breaks. The underlying channel auto-reconnects
+    // on transport errors, so we don't rebuild it here.
     loop {
         attempt += 1;
-
-        // --- Connect ---
-        let client = match ProcessGrpcClient::connect(&endpoint).await {
-            Ok(c) => {
-                if attempt > 1 {
-                    eprintln!("openshell: log push reconnected (attempt {attempt})");
-                }
-                backoff = INITIAL_BACKOFF;
-                c
-            }
-            Err(e) => {
-                eprintln!("openshell: log push connect failed: {e}");
-                // Drain the channel during backoff so the tracing layer doesn't
-                // block, but discard lines we can't deliver.
-                drain_during_backoff(&mut rx, &mut batch, backoff).await;
-                backoff = (backoff * 2).min(MAX_BACKOFF);
-                continue;
-            }
-        };
+        if attempt > 1 {
+            eprintln!("openshell: log push reconnected (attempt {attempt})");
+        }
 
         // --- Open the client-streaming RPC ---
         let (push_tx, push_rx) = mpsc::channel::<PushSandboxLogsRequest>(32);
@@ -227,8 +218,13 @@ async fn run_push_loop(
 
         if stream_broken {
             eprintln!("openshell: log push stream lost, reconnecting...");
-            backoff = INITIAL_BACKOFF;
-            // Loop back to reconnect.
+            // Drain incoming lines during backoff so the tracing layer's
+            // try_send doesn't fill up — the channel underneath us is still
+            // the same authenticated channel, but we throttle retries here so
+            // a sustained gateway-side failure doesn't burn CPU on RPC opens.
+            drain_during_backoff(&mut rx, &mut batch, backoff).await;
+            backoff = (backoff * 2).min(MAX_BACKOFF);
+            // Loop back to retry the streaming RPC.
         }
     }
 }

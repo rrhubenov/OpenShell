@@ -16,7 +16,7 @@ openshell-ocsf = { path = "../openshell-ocsf" }
 base64 = { workspace = true }
 prost = { workspace = true }
 prost-types = { workspace = true }
-tonic = { workspace = true }
+tonic = { workspace = true, features = ["channel", "tls"] }
 thiserror = { workspace = true }
 miette = { workspace = true }
 serde = { workspace = true }

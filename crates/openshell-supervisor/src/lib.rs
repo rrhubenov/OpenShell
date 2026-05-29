@@ -30,6 +30,8 @@ use openshell_ocsf::{
     SandboxContext, SeverityId, StateId, StatusId, ocsf_emit,
 };
 
+use openshell_core::grpc::AuthedChannel;
+
 // ---------------------------------------------------------------------------
 // OCSF Context
 // ---------------------------------------------------------------------------
@@ -84,12 +86,12 @@ enum InferenceRouteSource {
 
 fn infer_route_source(
     sandbox_id: Option<&str>,
-    openshell_endpoint: Option<&str>,
+    has_gateway: bool,
     inference_routes: Option<&str>,
 ) -> InferenceRouteSource {
     if inference_routes.is_some() {
         InferenceRouteSource::File
-    } else if sandbox_id.is_some() && openshell_endpoint.is_some() {
+    } else if sandbox_id.is_some() && has_gateway {
         InferenceRouteSource::Cluster
     } else {
         InferenceRouteSource::None
@@ -275,7 +277,6 @@ pub async fn run_sandbox(
     interactive: bool,
     sandbox_id: Option<String>,
     sandbox: Option<String>,
-    openshell_endpoint: Option<String>,
     policy_rules: Option<String>,
     policy_data: Option<String>,
     ssh_socket_path: Option<String>,
@@ -284,6 +285,7 @@ pub async fn run_sandbox(
     inference_routes: Option<String>,
     mode: SupervisorMode,
     ocsf_enabled: Arc<std::sync::atomic::AtomicBool>,
+    gateway_channel: Option<AuthedChannel>,
 ) -> Result<i32> {
     let (program, args) = command
         .split_first()
@@ -316,20 +318,23 @@ pub async fn run_sandbox(
         }
     }
 
+    // The single authenticated gateway channel comes from `main` so log push,
+    // run_sandbox, and every spawned subsystem share one TCP/TLS connection,
+    // one token slot, and one renewal loop.
+
     // Load policy and initialize OPA engine
-    let openshell_endpoint_for_proxy = openshell_endpoint.clone();
     let sandbox_name_for_agg = sandbox.clone();
     let (policy, opa_engine, retained_proto) = load_policy(
         sandbox_id.clone(),
         sandbox,
-        openshell_endpoint.clone(),
+        gateway_channel.clone(),
         policy_rules,
         policy_data,
     )
     .await?;
     let policy_local_ctx = Arc::new(policy_local::PolicyLocalContext::new(
         retained_proto.clone(),
-        openshell_endpoint.clone(),
+        gateway_channel.clone(),
         sandbox_name_for_agg.clone().or_else(|| sandbox_id.clone()),
     ));
 
@@ -346,8 +351,9 @@ pub async fn run_sandbox(
     // This is done after loading the policy so the sandbox can still start
     // even if provider env fetch fails (graceful degradation).
     let (provider_env_revision, provider_env, provider_credential_expires_at_ms) =
-        if let (Some(id), Some(endpoint)) = (&sandbox_id, &openshell_endpoint) {
-            match grpc_client::fetch_provider_environment(endpoint, id).await {
+        if let (Some(id), Some(channel)) = (&sandbox_id, gateway_channel.as_ref()) {
+            let client = grpc_client::CachedOpenShellClient::new(channel.clone());
+            match client.fetch_provider_environment(id).await {
                 Ok(result) => {
                     ocsf_emit!(
                         ConfigStateChangeBuilder::new(ocsf_ctx())
@@ -434,16 +440,16 @@ pub async fn run_sandbox(
     // Eagerly fetch the initial settings so skill install can honor the flag
     // at startup rather than waiting for the poll loop's first tick. In
     // offline/file-mode there is no gateway, so the flag stays false.
-    if let (Some(id), Some(endpoint)) = (&sandbox_id, &openshell_endpoint)
-        && let Ok(client) = grpc_client::CachedOpenShellClient::connect(endpoint).await
-        && let Ok(result) = client.poll_settings(id).await
-    {
-        let initial = extract_bool_setting(
-            &result.settings,
-            openshell_core::settings::AGENT_POLICY_PROPOSALS_ENABLED_KEY,
-        )
-        .unwrap_or(false);
-        proposals_enabled.store(initial, Ordering::Relaxed);
+    if let (Some(id), Some(channel)) = (&sandbox_id, gateway_channel.as_ref()) {
+        let client = grpc_client::CachedOpenShellClient::new(channel.clone());
+        if let Ok(result) = client.poll_settings(id).await {
+            let initial = extract_bool_setting(
+                &result.settings,
+                openshell_core::settings::AGENT_POLICY_PROPOSALS_ENABLED_KEY,
+            )
+            .unwrap_or(false);
+            proposals_enabled.store(initial, Ordering::Relaxed);
+        }
     }
 
     // The skill files are read by the entrypoint child, so only install them
@@ -623,7 +629,7 @@ pub async fn run_sandbox(
             // Build inference context for local routing of intercepted inference calls.
             let inference_ctx = build_inference_context(
                 sandbox_id.as_deref(),
-                openshell_endpoint_for_proxy.as_deref(),
+                gateway_channel.as_ref(),
                 inference_routes.as_deref(),
             )
             .await?;
@@ -861,13 +867,13 @@ pub async fn run_sandbox(
     // connect and ExecSandbox through the gateway, so it only runs alongside
     // the SSH server (Process mode).
     if mode.has(SupervisorComponent::Process)
-        && let (Some(endpoint), Some(id), Some(socket)) = (
-            openshell_endpoint.as_ref(),
+        && let (Some(channel), Some(id), Some(socket)) = (
+            gateway_channel.as_ref(),
             sandbox_id.as_ref(),
             ssh_socket_path.as_ref(),
         )
     {
-        supervisor_session::spawn(endpoint.clone(), id.clone(), socket.clone(), ssh_netns_fd);
+        supervisor_session::spawn(channel.clone(), id.clone(), socket.clone(), ssh_netns_fd);
         info!("supervisor session task spawned");
     }
 
@@ -984,11 +990,11 @@ pub async fn run_sandbox(
     }
 
     // Spawn background policy poll task (gRPC mode only).
-    if let (Some(id), Some(endpoint), Some(engine)) =
-        (&sandbox_id, &openshell_endpoint, &opa_engine)
+    if let (Some(id), Some(channel), Some(engine)) =
+        (&sandbox_id, gateway_channel.as_ref(), &opa_engine)
     {
         let poll_id = id.clone();
-        let poll_endpoint = endpoint.clone();
+        let poll_channel = channel.clone();
         let poll_engine = engine.clone();
         let poll_ocsf_enabled = ocsf_enabled.clone();
         let poll_pid = entrypoint_pid.clone();
@@ -999,7 +1005,7 @@ pub async fn run_sandbox(
             .and_then(|v| v.parse().ok())
             .unwrap_or(10);
         let poll_ctx = PolicyPollLoopContext {
-            endpoint: poll_endpoint,
+            channel: poll_channel,
             sandbox_id: poll_id,
             opa_engine: poll_engine,
             entrypoint_pid: poll_pid,
@@ -1030,7 +1036,7 @@ pub async fn run_sandbox(
         {
             // SubmitPolicyAnalysis resolves by sandbox *name*, not UUID.
             let agg_name = sandbox_name_for_agg.clone().unwrap_or_else(|| id.clone());
-            let agg_endpoint = endpoint.clone();
+            let agg_channel = channel.clone();
             let flush_interval_secs: u64 = std::env::var("OPENSHELL_DENIAL_FLUSH_INTERVAL_SECS")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -1041,12 +1047,11 @@ pub async fn run_sandbox(
             tokio::spawn(async move {
                 aggregator
                     .run(|summaries| {
-                        let endpoint = agg_endpoint.clone();
+                        let channel = agg_channel.clone();
                         let sandbox_name = agg_name.clone();
                         async move {
                             if let Err(e) =
-                                flush_proposals_to_gateway(&endpoint, &sandbox_name, summaries)
-                                    .await
+                                flush_proposals_to_gateway(channel, &sandbox_name, summaries).await
                             {
                                 warn!(error = %e, "Failed to flush denial summaries to gateway");
                             }
@@ -1117,13 +1122,13 @@ pub async fn run_sandbox(
 #[allow(clippy::similar_names)]
 async fn build_inference_context(
     sandbox_id: Option<&str>,
-    openshell_endpoint: Option<&str>,
+    gateway_channel: Option<&AuthedChannel>,
     inference_routes: Option<&str>,
 ) -> Result<Option<Arc<proxy::InferenceContext>>> {
     use openshell_router::Router;
     use openshell_router::config::RouterConfig;
 
-    let source = infer_route_source(sandbox_id, openshell_endpoint, inference_routes);
+    let source = infer_route_source(sandbox_id, gateway_channel.is_some(), inference_routes);
 
     // Captured during the initial cluster bundle fetch so the background refresh
     // loop can skip no-op updates from the very first tick.
@@ -1163,13 +1168,14 @@ async fn build_inference_context(
                 .map_err(|e| miette::miette!("failed to resolve routes from {path}: {e}"))?
         }
         InferenceRouteSource::Cluster => {
-            let (Some(_id), Some(endpoint)) = (sandbox_id, openshell_endpoint) else {
+            let (Some(_id), Some(channel)) = (sandbox_id, gateway_channel) else {
                 return Ok(None);
             };
 
             // Cluster mode: fetch bundle from gateway
-            info!(endpoint = %endpoint, "Fetching inference route bundle from gateway");
-            match grpc_client::fetch_inference_bundle(endpoint).await {
+            info!("Fetching inference route bundle from gateway");
+            let client = grpc_client::CachedOpenShellClient::new(channel.clone());
+            match client.fetch_inference_bundle().await {
                 Ok(bundle) => {
                     initial_revision = Some(bundle.revision.clone());
                     ocsf_emit!(
@@ -1277,12 +1283,12 @@ async fn build_inference_context(
     // Spawn background route cache refresh for cluster mode at startup so
     // request handling never depends on control-plane latency.
     if matches!(source, InferenceRouteSource::Cluster)
-        && let (Some(_id), Some(endpoint)) = (sandbox_id, openshell_endpoint)
+        && let (Some(_id), Some(channel)) = (sandbox_id, gateway_channel)
     {
         spawn_route_refresh(
             ctx.route_cache(),
             ctx.system_route_cache(),
-            endpoint.to_string(),
+            channel.clone(),
             route_refresh_interval_secs(),
             initial_revision,
         );
@@ -1355,7 +1361,7 @@ pub(crate) fn bundle_to_resolved_routes(
 pub(crate) fn spawn_route_refresh(
     user_cache: Arc<tokio::sync::RwLock<Vec<openshell_router::config::ResolvedRoute>>>,
     system_cache: Arc<tokio::sync::RwLock<Vec<openshell_router::config::ResolvedRoute>>>,
-    endpoint: String,
+    channel: AuthedChannel,
     interval_secs: u64,
     initial_revision: Option<String>,
 ) {
@@ -1363,6 +1369,7 @@ pub(crate) fn spawn_route_refresh(
         use tokio::time::{MissedTickBehavior, interval};
 
         let mut current_revision = initial_revision;
+        let client = grpc_client::CachedOpenShellClient::new(channel);
 
         let mut tick = interval(Duration::from_secs(interval_secs));
         tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -1370,7 +1377,7 @@ pub(crate) fn spawn_route_refresh(
         loop {
             tick.tick().await;
 
-            match grpc_client::fetch_inference_bundle(&endpoint).await {
+            match client.fetch_inference_bundle().await {
                 Ok(bundle) => {
                     if current_revision.as_deref() == Some(&bundle.revision) {
                         trace!(revision = %bundle.revision, "Inference bundle unchanged");
@@ -1936,7 +1943,7 @@ use openshell_core::grpc_retry::grpc_retry;
 async fn load_policy(
     sandbox_id: Option<String>,
     sandbox: Option<String>,
-    openshell_endpoint: Option<String>,
+    gateway_channel: Option<AuthedChannel>,
     policy_rules: Option<String>,
     policy_data: Option<String>,
 ) -> Result<(
@@ -1976,14 +1983,13 @@ async fn load_policy(
     }
 
     // gRPC mode: fetch typed proto policy, construct OPA engine from baked rules + proto data
-    if let (Some(id), Some(endpoint)) = (&sandbox_id, &openshell_endpoint) {
+    if let (Some(id), Some(channel)) = (&sandbox_id, &gateway_channel) {
         info!(
             sandbox_id = %id,
-            endpoint = %endpoint,
             "Fetching sandbox policy via gRPC"
         );
-        let proto_policy =
-            grpc_retry("Policy fetch", || grpc_client::fetch_policy(endpoint, id)).await?;
+        let client = grpc_client::CachedOpenShellClient::new(channel.clone());
+        let proto_policy = grpc_retry("Policy fetch", || client.fetch_policy(id)).await?;
 
         let mut proto_policy = if let Some(p) = proto_policy {
             p
@@ -2013,7 +2019,7 @@ async fn load_policy(
             // Sync and re-fetch over a single connection to avoid extra
             // TLS handshakes.
             grpc_retry("Policy discovery sync", || {
-                grpc_client::discover_and_sync_policy(endpoint, id, sandbox, &discovered)
+                client.discover_and_sync_policy(id, sandbox, &discovered)
             })
             .await?
         };
@@ -2024,7 +2030,7 @@ async fn load_policy(
         let enriched = enrich_proto_baseline_paths(&mut proto_policy);
         if enriched
             && let Some(sandbox_name) = sandbox.as_deref()
-            && let Err(e) = grpc_client::sync_policy(endpoint, sandbox_name, &proto_policy).await
+            && let Err(e) = client.sync_policy(sandbox_name, &proto_policy).await
         {
             warn!(
                 error = %e,
@@ -2305,14 +2311,14 @@ fn prepare_filesystem(_policy: &SandboxPolicy) -> Result<()> {
 /// When a new version is detected, attempts to reload the OPA engine via
 /// Flush aggregated denial summaries to the gateway via `SubmitPolicyAnalysis`.
 async fn flush_proposals_to_gateway(
-    endpoint: &str,
+    channel: AuthedChannel,
     sandbox_name: &str,
     summaries: Vec<denial_aggregator::FlushableDenialSummary>,
 ) -> Result<()> {
     use crate::grpc_client::CachedOpenShellClient;
     use openshell_core::proto::{DenialSummary, L7RequestSample};
 
-    let client = CachedOpenShellClient::connect(endpoint).await?;
+    let client = CachedOpenShellClient::new(channel);
 
     // Convert FlushableDenialSummary to proto DenialSummary.
     let proto_summaries: Vec<DenialSummary> = summaries
@@ -2372,7 +2378,7 @@ async fn flush_proposals_to_gateway(
 /// When the entrypoint PID is available, policy reloads include symlink
 /// resolution for binary paths via the container filesystem.
 struct PolicyPollLoopContext {
-    endpoint: String,
+    channel: AuthedChannel,
     sandbox_id: String,
     opa_engine: Arc<OpaEngine>,
     entrypoint_pid: Arc<AtomicU32>,
@@ -2387,7 +2393,7 @@ async fn run_policy_poll_loop(ctx: PolicyPollLoopContext) -> Result<()> {
     use openshell_core::proto::PolicySource;
     use std::sync::atomic::Ordering;
 
-    let client = CachedOpenShellClient::connect(&ctx.endpoint).await?;
+    let client = CachedOpenShellClient::new(ctx.channel.clone());
     let mut current_config_revision: u64 = 0;
     let mut current_provider_env_revision: u64 = ctx.provider_credentials.snapshot().revision;
     let mut current_policy_hash = String::new();
@@ -2449,7 +2455,7 @@ async fn run_policy_poll_loop(ctx: PolicyPollLoopContext) -> Result<()> {
             .build());
 
         if provider_env_changed {
-            match grpc_client::fetch_provider_environment(&ctx.endpoint, &ctx.sandbox_id).await {
+            match client.fetch_provider_environment(&ctx.sandbox_id).await {
                 Ok(env_result) => {
                     let env_count = ctx.provider_credentials.install_environment(
                         env_result.provider_env_revision,
@@ -2921,7 +2927,7 @@ routes:
         let path = f.path().to_str().unwrap();
 
         // Even with sandbox_id and endpoint, route_file takes precedence
-        let ctx = build_inference_context(Some("sb-1"), Some("http://localhost:50051"), Some(path))
+        let ctx = build_inference_context(Some("sb-1"), None, Some(path))
             .await
             .expect("should load from file");
 
@@ -2934,11 +2940,7 @@ routes:
     #[test]
     fn infer_route_source_prefers_file_mode() {
         assert_eq!(
-            infer_route_source(
-                Some("sb-1"),
-                Some("http://localhost:50051"),
-                Some("routes.yaml")
-            ),
+            infer_route_source(Some("sb-1"), true, Some("routes.yaml")),
             InferenceRouteSource::File
         );
     }
@@ -2946,15 +2948,15 @@ routes:
     #[test]
     fn infer_route_source_cluster_requires_id_and_endpoint() {
         assert_eq!(
-            infer_route_source(Some("sb-1"), Some("http://localhost:50051"), None),
+            infer_route_source(Some("sb-1"), true, None),
             InferenceRouteSource::Cluster
         );
         assert_eq!(
-            infer_route_source(Some("sb-1"), None, None),
+            infer_route_source(Some("sb-1"), false, None),
             InferenceRouteSource::None
         );
         assert_eq!(
-            infer_route_source(None, Some("http://localhost:50051"), None),
+            infer_route_source(None, true, None),
             InferenceRouteSource::None
         );
     }
