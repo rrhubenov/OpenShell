@@ -140,7 +140,7 @@ if [[ "${HOST_OS}" == "Linux" && "${HOST_ARCH}" == "${DAEMON_ARCH}" ]]; then
   # Native Linux build — no cross-toolchain required.
   rustup target add "${SUPERVISOR_TARGET}" >/dev/null 2>&1 || true
   cargo build ${CARGO_BUILD_JOBS_ARG[@]+"${CARGO_BUILD_JOBS_ARG[@]}"} \
-    -p openshell-sandbox --target "${SUPERVISOR_TARGET}"
+    -p openshell-supervisor --target "${SUPERVISOR_TARGET}"
   mkdir -p "${SUPERVISOR_OUT_DIR}"
   cp "${ROOT}/target/${SUPERVISOR_TARGET}/debug/openshell-sandbox" "${SUPERVISOR_BIN}"
 else

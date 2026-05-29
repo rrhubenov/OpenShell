@@ -104,7 +104,7 @@ resolve_component() {
       target_libc=gnu
       ;;
     supervisor)
-      crate=openshell-sandbox
+      crate=openshell-supervisor
       binary=openshell-sandbox
       target_libc=musl
       ;;
