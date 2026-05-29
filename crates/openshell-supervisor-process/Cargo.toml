@@ -18,8 +18,8 @@ openshell-ocsf = { path = "../openshell-ocsf" }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
 
-# gRPC
-tonic = { workspace = true, features = ["channel", "tls"] }
+# gRPC (TLS handled in openshell-core::grpc)
+tonic = { workspace = true, features = ["channel"] }
 
 # Error handling
 miette = { workspace = true }
@@ -40,6 +40,9 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
+# Filesystem helpers (used at runtime to stage nftables rulesets in netns)
+tempfile = "3"
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
@@ -49,7 +52,6 @@ seccompiler = "0.5"
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
-tempfile = "3"
 temp-env = "0.3"
 
 [lints]
