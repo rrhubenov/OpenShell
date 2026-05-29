@@ -269,6 +269,56 @@ async fn wait_for_shutdown_signal() {
 /// # Errors
 ///
 /// Returns an error if the command fails to start or encounters a fatal error.
+/// Filesystem paths to the ephemeral CA cert and combined trust bundle.
+type CaFilePaths = (std::path::PathBuf, std::path::PathBuf);
+
+/// State produced by `setup_shared` and consumed by every downstream phase.
+struct SharedContext {
+    policy: SandboxPolicy,
+    opa_engine: Option<Arc<OpaEngine>>,
+    retained_proto: Option<openshell_core::proto::SandboxPolicy>,
+    policy_local_ctx: Arc<policy_local::PolicyLocalContext>,
+    provider_credentials: provider_credentials::ProviderCredentialState,
+    #[cfg(target_os = "linux")]
+    netns: Option<NetworkNamespace>,
+    entrypoint_pid: Arc<AtomicU32>,
+    sandbox_name_for_agg: Option<String>,
+    sandbox_id: Option<String>,
+    gateway_channel: Option<AuthedChannel>,
+}
+
+/// Handles produced by `setup_network`. Held by `run_sandbox` for the
+/// supervisor's lifetime so the proxy and bypass monitor stay alive.
+struct NetworkContext {
+    _proxy: Option<ProxyHandle>,
+    #[cfg(target_os = "linux")]
+    _bypass_monitor: Option<tokio::task::JoinHandle<()>>,
+    denial_rx: Option<tokio::sync::mpsc::UnboundedReceiver<openshell_core::DenialEvent>>,
+    ssh_proxy_url: Option<String>,
+    ca_file_paths: Option<CaFilePaths>,
+    #[cfg(target_os = "linux")]
+    ssh_netns_fd: Option<i32>,
+}
+
+impl NetworkContext {
+    fn take_denial_rx(
+        &mut self,
+    ) -> Option<tokio::sync::mpsc::UnboundedReceiver<openshell_core::DenialEvent>> {
+        self.denial_rx.take()
+    }
+}
+
+/// Handle to the entrypoint child process. Held by `run_sandbox` so it can
+/// `wait()` (or `kill()` on timeout) before returning the exit code.
+struct ProcessContext {
+    handle: ProcessHandle,
+}
+
+/// Run a command in the sandbox.
+///
+/// # Errors
+///
+/// Returns an error if the command fails to start or encounters a fatal error.
 #[allow(clippy::too_many_arguments, clippy::similar_names)]
 pub async fn run_sandbox(
     command: Vec<String>,
@@ -293,6 +343,62 @@ pub async fn run_sandbox(
 
     info!(mode = %mode, "Supervisor mode");
 
+    let shared = setup_shared(
+        sandbox_id,
+        sandbox,
+        gateway_channel,
+        policy_rules,
+        policy_data,
+    )
+    .await?;
+
+    let mut network = if mode.has(SupervisorComponent::Network) {
+        Some(setup_network(&shared, inference_routes.as_deref()).await?)
+    } else {
+        None
+    };
+
+    let process = if mode.has(SupervisorComponent::Process) {
+        let ssh_proxy_url = network.as_ref().and_then(|n| n.ssh_proxy_url.clone());
+        let ca_paths = network.as_ref().and_then(|n| n.ca_file_paths.clone());
+        #[cfg(target_os = "linux")]
+        let ssh_netns_fd = network.as_ref().and_then(|n| n.ssh_netns_fd);
+        #[cfg(not(target_os = "linux"))]
+        let ssh_netns_fd: Option<i32> = None;
+        Some(
+            setup_process(
+                &shared,
+                program,
+                args,
+                workdir.as_deref(),
+                interactive,
+                ssh_proxy_url,
+                ca_paths,
+                ssh_socket_path.map(std::path::PathBuf::from),
+                ssh_netns_fd,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+
+    let denial_rx = network.as_mut().and_then(NetworkContext::take_denial_rx);
+    spawn_policy_poll_loop(&shared, ocsf_enabled, denial_rx);
+
+    run_until_shutdown(process, timeout_secs).await
+}
+
+/// Initialize OCSF context, load policy, fetch provider credentials, create
+/// the network namespace, and prepare the proposals flag. The returned
+/// `SharedContext` drives every downstream phase.
+async fn setup_shared(
+    sandbox_id: Option<String>,
+    sandbox: Option<String>,
+    gateway_channel: Option<AuthedChannel>,
+    policy_rules: Option<String>,
+    policy_data: Option<String>,
+) -> Result<SharedContext> {
     // Initialize the process-wide OCSF context early so that events emitted
     // during policy loading (filesystem config, validation) have a context.
     // Proxy IP/port use defaults here; they are only significant for network
@@ -337,15 +443,6 @@ pub async fn run_sandbox(
         gateway_channel.clone(),
         sandbox_name_for_agg.clone().or_else(|| sandbox_id.clone()),
     ));
-
-    // Validate that the required "sandbox" user exists in this image.
-    // All sandbox images must include this user for privilege dropping.
-    // Network-only mode never spawns the entrypoint child, so no user lookup
-    // is required.
-    #[cfg(unix)]
-    if mode.has(SupervisorComponent::Process) {
-        validate_sandbox_user(&policy)?;
-    }
 
     // Fetch provider environment variables from the server.
     // This is done after loading the policy so the sandbox can still start
@@ -409,24 +506,6 @@ pub async fn run_sandbox(
     // The proxy still sees rotations live via resolver(); only direct env
     // reads inside SSH children are stale.
     // Alternative is a shared RWLock around the state.
-    let provider_env = provider_credentials.snapshot().child_env.clone();
-
-    // Create identity cache for SHA256 TOFU when OPA is active.
-    // Only the proxy consumes the cache, so skip allocation in Process mode.
-    let identity_cache = if mode.has(SupervisorComponent::Network) {
-        opa_engine
-            .as_ref()
-            .map(|_| Arc::new(BinaryIdentityCache::new()))
-    } else {
-        None
-    };
-
-    // Prepare filesystem: create and chown read_write directories.
-    // The filesystem layout is for the entrypoint child; Network-only mode
-    // skips this step.
-    if mode.has(SupervisorComponent::Process) {
-        prepare_filesystem(&policy)?;
-    }
 
     // Initialize the agent-proposals feature flag. Default false until the
     // initial settings fetch (or the poll loop) tells us otherwise. The flag
@@ -451,89 +530,6 @@ pub async fn run_sandbox(
             proposals_enabled.store(initial, Ordering::Relaxed);
         }
     }
-
-    // The skill files are read by the entrypoint child, so only install them
-    // when there will actually be a child running (Both / Process modes).
-    if mode.has(SupervisorComponent::Process) {
-        if agent_proposals_enabled() {
-            match skills::install_static_skills() {
-                Ok(installed) => {
-                    info!(
-                        path = %installed.policy_advisor.display(),
-                        "Installed sandbox agent skill"
-                    );
-                }
-                Err(error) => {
-                    warn!(error = %error, "Failed to install sandbox agent skill");
-                }
-            }
-        } else {
-            debug!("agent_policy_proposals_enabled is false at startup; skipping skill install");
-        }
-    }
-
-    // Generate ephemeral CA and TLS state for HTTPS L7 inspection.
-    // The CA cert is written to disk so sandbox processes can trust it.
-    // Only the network side terminates TLS; Process-only mode skips this.
-    let (tls_state, ca_file_paths) =
-        if mode.has(SupervisorComponent::Network)
-            && matches!(policy.network.mode, NetworkMode::Proxy)
-        {
-            match SandboxCa::generate() {
-                Ok(ca) => {
-                    let tls_dir = std::path::Path::new("/etc/openshell-tls");
-                    let system_ca_bundle = read_system_ca_bundle();
-                    match write_ca_files(&ca, tls_dir, &system_ca_bundle) {
-                        Ok(paths) => {
-                            // /etc/openshell-tls is subsumed by the /etc baseline
-                            // path injected by enrich_*_baseline_paths(), so no
-                            // explicit Landlock entry is needed here.
-
-                            let upstream_config = build_upstream_client_config(&system_ca_bundle);
-                            let cert_cache = CertCache::new(ca);
-                            let state = Arc::new(ProxyTlsState::new(cert_cache, upstream_config));
-                            ocsf_emit!(
-                                ConfigStateChangeBuilder::new(ocsf_ctx())
-                                    .severity(SeverityId::Informational)
-                                    .status(StatusId::Success)
-                                    .state(StateId::Enabled, "enabled")
-                                    .message("TLS termination enabled: ephemeral CA generated")
-                                    .build()
-                            );
-                            (Some(state), Some(paths))
-                        }
-                        Err(e) => {
-                            ocsf_emit!(
-                                ConfigStateChangeBuilder::new(ocsf_ctx())
-                                    .severity(SeverityId::Medium)
-                                    .status(StatusId::Failure)
-                                    .state(StateId::Disabled, "disabled")
-                                    .message(format!(
-                                        "Failed to write CA files, TLS termination disabled: {e}"
-                                    ))
-                                    .build()
-                            );
-                            (None, None)
-                        }
-                    }
-                }
-                Err(e) => {
-                    ocsf_emit!(
-                        ConfigStateChangeBuilder::new(ocsf_ctx())
-                            .severity(SeverityId::Medium)
-                            .status(StatusId::Failure)
-                            .state(StateId::Disabled, "disabled")
-                            .message(format!(
-                                "Failed to generate ephemeral CA, TLS termination disabled: {e}"
-                            ))
-                            .build()
-                    );
-                    (None, None)
-                }
-            }
-        } else {
-            (None, None)
-        };
 
     // Create network namespace for proxy mode (Linux only)
     // This must be created before the proxy AND SSH server so that SSH
@@ -577,109 +573,176 @@ pub async fn run_sandbox(
         None
     };
 
-    // On non-Linux, network namespace isolation is not supported
-    #[cfg(not(target_os = "linux"))]
-    #[allow(clippy::no_effect_underscore_binding)]
-    let _netns: Option<()> = None;
-
-    // Install the supervisor seccomp prelude after privileged startup helpers
-    // (network namespace setup, nftables probes) complete, but before the SSH
-    // listener and workload process are exposed. Network-only mode never
-    // exposes either, so its hardening profile is owned by the surrounding
-    // deployment instead.
-    if mode.has(SupervisorComponent::Process) {
-        apply_supervisor_startup_hardening()?;
-    }
-
     // Shared PID: set after process spawn so the proxy can look up
     // the entrypoint process's /proc/net/tcp for identity binding.
     let entrypoint_pid = Arc::new(AtomicU32::new(0));
 
-    let (_proxy, denial_rx, bypass_denial_tx) =
-        if mode.has(SupervisorComponent::Network)
-            && matches!(policy.network.mode, NetworkMode::Proxy)
-        {
-            let proxy_policy = policy.network.proxy.as_ref().ok_or_else(|| {
-                miette::miette!(
-                    "Network mode is set to proxy but no proxy configuration was provided"
-                )
-            })?;
+    Ok(SharedContext {
+        policy,
+        opa_engine,
+        retained_proto,
+        policy_local_ctx,
+        provider_credentials,
+        #[cfg(target_os = "linux")]
+        netns,
+        entrypoint_pid,
+        sandbox_name_for_agg,
+        sandbox_id,
+        gateway_channel,
+    })
+}
 
-            let engine = opa_engine.clone().ok_or_else(|| {
-                miette::miette!("Proxy mode requires an OPA engine (--rego-policy and --rego-data)")
-            })?;
-
-            let cache = identity_cache.clone().ok_or_else(|| {
-                miette::miette!(
-                    "Proxy mode requires an identity cache (OPA engine must be configured)"
-                )
-            })?;
-
-            // If we have a network namespace, bind to the veth host IP so sandboxed
-            // processes can reach the proxy via TCP.
+/// Start the egress proxy stack: identity cache, TLS state, the CONNECT
+/// proxy itself, the bypass monitor (Linux only), and the SSH-side
+/// rendezvous values (proxy URL, CA paths, netns fd). Skipped entirely when
+/// the policy is not in proxy mode.
+async fn setup_network(
+    shared: &SharedContext,
+    inference_routes: Option<&str>,
+) -> Result<NetworkContext> {
+    if !matches!(shared.policy.network.mode, NetworkMode::Proxy) {
+        // Non-proxy network mode still satisfies the `--mode=network`
+        // selector but has no proxy/TLS/bypass plumbing to spin up.
+        return Ok(NetworkContext {
+            _proxy: None,
             #[cfg(target_os = "linux")]
-            let bind_addr = netns.as_ref().map(|ns| {
-                let port = proxy_policy.http_addr.map_or(3128, |addr| addr.port());
-                SocketAddr::new(ns.host_ip(), port)
-            });
+            _bypass_monitor: None,
+            denial_rx: None,
+            ssh_proxy_url: None,
+            ca_file_paths: None,
+            #[cfg(target_os = "linux")]
+            ssh_netns_fd: None,
+        });
+    }
 
-            #[cfg(not(target_os = "linux"))]
-            let bind_addr: Option<SocketAddr> = None;
+    // Create identity cache for SHA256 TOFU when OPA is active. Only the
+    // proxy consumes the cache, so we only allocate it here.
+    let identity_cache = shared
+        .opa_engine
+        .as_ref()
+        .map(|_| Arc::new(BinaryIdentityCache::new()));
 
-            // Build inference context for local routing of intercepted inference calls.
-            let inference_ctx = build_inference_context(
-                sandbox_id.as_deref(),
-                gateway_channel.as_ref(),
-                inference_routes.as_deref(),
-            )
-            .await?;
-
-            // Create denial aggregator channel if in gRPC mode (sandbox_id present).
-            // Clone the sender for the bypass monitor before passing to the proxy.
-            let (denial_tx, denial_rx, bypass_denial_tx) = if sandbox_id.is_some() {
-                let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-                let bypass_tx = tx.clone();
-                (Some(tx), Some(rx), Some(bypass_tx))
-            } else {
-                (None, None, None)
-            };
-
-            let proxy_handle = ProxyHandle::start_with_bind_addr(
-                proxy_policy,
-                bind_addr,
-                engine,
-                cache,
-                entrypoint_pid.clone(),
-                tls_state,
-                inference_ctx,
-                provider_credentials.resolver(),
-                Some(policy_local_ctx.clone()),
-                denial_tx,
-            )
-            .await?;
-            (Some(proxy_handle), denial_rx, bypass_denial_tx)
-        } else {
-            (None, None, None)
-        };
-
-    // Spawn bypass detection monitor (Linux only, proxy mode only).
-    // Reads /dev/kmsg for nftables log entries and emits structured
-    // tracing events for direct connection attempts that bypass the proxy.
-    // Bypass denials feed the denial aggregator, so this only runs alongside
-    // the proxy.
-    #[cfg(target_os = "linux")]
-    let _bypass_monitor = if mode.has(SupervisorComponent::Network) {
-        netns.as_ref().and_then(|ns| {
-            bypass_monitor::spawn(
-                ns.name().to_string(),
-                entrypoint_pid.clone(),
-                bypass_denial_tx,
-            )
-        })
-    } else {
-        drop(bypass_denial_tx);
-        None
+    // Generate ephemeral CA and TLS state for HTTPS L7 inspection.
+    // The CA cert is written to disk so sandbox processes can trust it.
+    let (tls_state, ca_file_paths) = match SandboxCa::generate() {
+        Ok(ca) => {
+            let tls_dir = std::path::Path::new("/etc/openshell-tls");
+            let system_ca_bundle = read_system_ca_bundle();
+            match write_ca_files(&ca, tls_dir, &system_ca_bundle) {
+                Ok(paths) => {
+                    // /etc/openshell-tls is subsumed by the /etc baseline
+                    // path injected by enrich_*_baseline_paths(), so no
+                    // explicit Landlock entry is needed here.
+                    let upstream_config = build_upstream_client_config(&system_ca_bundle);
+                    let cert_cache = CertCache::new(ca);
+                    let state = Arc::new(ProxyTlsState::new(cert_cache, upstream_config));
+                    ocsf_emit!(
+                        ConfigStateChangeBuilder::new(ocsf_ctx())
+                            .severity(SeverityId::Informational)
+                            .status(StatusId::Success)
+                            .state(StateId::Enabled, "enabled")
+                            .message("TLS termination enabled: ephemeral CA generated")
+                            .build()
+                    );
+                    (Some(state), Some(paths))
+                }
+                Err(e) => {
+                    ocsf_emit!(
+                        ConfigStateChangeBuilder::new(ocsf_ctx())
+                            .severity(SeverityId::Medium)
+                            .status(StatusId::Failure)
+                            .state(StateId::Disabled, "disabled")
+                            .message(format!(
+                                "Failed to write CA files, TLS termination disabled: {e}"
+                            ))
+                            .build()
+                    );
+                    (None, None)
+                }
+            }
+        }
+        Err(e) => {
+            ocsf_emit!(
+                ConfigStateChangeBuilder::new(ocsf_ctx())
+                    .severity(SeverityId::Medium)
+                    .status(StatusId::Failure)
+                    .state(StateId::Disabled, "disabled")
+                    .message(format!(
+                        "Failed to generate ephemeral CA, TLS termination disabled: {e}"
+                    ))
+                    .build()
+            );
+            (None, None)
+        }
     };
+
+    let proxy_policy = shared.policy.network.proxy.as_ref().ok_or_else(|| {
+        miette::miette!("Network mode is set to proxy but no proxy configuration was provided")
+    })?;
+
+    let engine = shared.opa_engine.clone().ok_or_else(|| {
+        miette::miette!("Proxy mode requires an OPA engine (--rego-policy and --rego-data)")
+    })?;
+
+    let cache = identity_cache.ok_or_else(|| {
+        miette::miette!("Proxy mode requires an identity cache (OPA engine must be configured)")
+    })?;
+
+    // If we have a network namespace, bind to the veth host IP so sandboxed
+    // processes can reach the proxy via TCP.
+    #[cfg(target_os = "linux")]
+    let bind_addr = shared.netns.as_ref().map(|ns| {
+        let port = proxy_policy.http_addr.map_or(3128, |addr| addr.port());
+        SocketAddr::new(ns.host_ip(), port)
+    });
+
+    #[cfg(not(target_os = "linux"))]
+    let bind_addr: Option<SocketAddr> = None;
+
+    // Build inference context for local routing of intercepted inference calls.
+    let inference_ctx = build_inference_context(
+        shared.sandbox_id.as_deref(),
+        shared.gateway_channel.as_ref(),
+        inference_routes,
+    )
+    .await?;
+
+    // Create denial aggregator channel if in gRPC mode (sandbox_id present).
+    // Clone the sender for the bypass monitor before passing to the proxy.
+    let (denial_tx, denial_rx, bypass_denial_tx) = if shared.sandbox_id.is_some() {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let bypass_tx = tx.clone();
+        (Some(tx), Some(rx), Some(bypass_tx))
+    } else {
+        (None, None, None)
+    };
+
+    let proxy_handle = ProxyHandle::start_with_bind_addr(
+        proxy_policy,
+        bind_addr,
+        engine,
+        cache,
+        shared.entrypoint_pid.clone(),
+        tls_state,
+        inference_ctx,
+        shared.provider_credentials.resolver(),
+        Some(shared.policy_local_ctx.clone()),
+        denial_tx,
+    )
+    .await?;
+
+    // Spawn bypass detection monitor (Linux only). Reads /dev/kmsg for
+    // nftables log entries and emits structured tracing events for direct
+    // connection attempts that bypass the proxy. Bypass denials feed the
+    // denial aggregator, so this only runs alongside the proxy.
+    #[cfg(target_os = "linux")]
+    let bypass_monitor = shared.netns.as_ref().and_then(|ns| {
+        bypass_monitor::spawn(
+            ns.name().to_string(),
+            shared.entrypoint_pid.clone(),
+            bypass_denial_tx,
+        )
+    });
 
     // On non-Linux, bypass_denial_tx is unused (no /dev/kmsg).
     #[cfg(not(target_os = "linux"))]
@@ -692,36 +755,87 @@ pub async fn run_sandbox(
     // - proxy_url: set proxy env vars so cooperative tools route through the
     //   CONNECT proxy; this also opts Node.js into honoring those vars
     #[cfg(target_os = "linux")]
-    let ssh_netns_fd = netns.as_ref().and_then(NetworkNamespace::ns_fd);
+    let ssh_netns_fd = shared.netns.as_ref().and_then(NetworkNamespace::ns_fd);
+
+    #[cfg(target_os = "linux")]
+    let ssh_proxy_url = shared.netns.as_ref().map(|ns| {
+        let port = shared
+            .policy
+            .network
+            .proxy
+            .as_ref()
+            .and_then(|p| p.http_addr)
+            .map_or(3128, |addr| addr.port());
+        format!("http://{}:{port}", ns.host_ip())
+    });
 
     #[cfg(not(target_os = "linux"))]
-    let ssh_netns_fd: Option<i32> = None;
+    let ssh_proxy_url = shared
+        .policy
+        .network
+        .proxy
+        .as_ref()
+        .and_then(|p| p.http_addr)
+        .map(|addr| format!("http://{addr}"));
 
-    let ssh_proxy_url = if matches!(policy.network.mode, NetworkMode::Proxy) {
+    Ok(NetworkContext {
+        _proxy: Some(proxy_handle),
         #[cfg(target_os = "linux")]
-        {
-            netns.as_ref().map(|ns| {
-                let port = policy
-                    .network
-                    .proxy
-                    .as_ref()
-                    .and_then(|p| p.http_addr)
-                    .map_or(3128, |addr| addr.port());
-                format!("http://{}:{port}", ns.host_ip())
-            })
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            policy
-                .network
-                .proxy
-                .as_ref()
-                .and_then(|p| p.http_addr)
-                .map(|addr| format!("http://{addr}"))
+        _bypass_monitor: bypass_monitor,
+        denial_rx,
+        ssh_proxy_url,
+        ca_file_paths,
+        #[cfg(target_os = "linux")]
+        ssh_netns_fd,
+    })
+}
+
+/// Bring up the entrypoint side: validate the sandbox user, prepare the
+/// filesystem, install agent skills, apply seccomp, spawn the zombie reaper
+/// and SSH server, start the supervisor session, and finally fork the
+/// entrypoint child.
+#[allow(clippy::too_many_arguments)]
+async fn setup_process(
+    shared: &SharedContext,
+    program: &str,
+    args: &[String],
+    workdir: Option<&str>,
+    interactive: bool,
+    ssh_proxy_url: Option<String>,
+    ca_file_paths: Option<CaFilePaths>,
+    ssh_socket_path: Option<std::path::PathBuf>,
+    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))] ssh_netns_fd: Option<i32>,
+) -> Result<ProcessContext> {
+    // Validate that the required "sandbox" user exists in this image.
+    // All sandbox images must include this user for privilege dropping.
+    #[cfg(unix)]
+    validate_sandbox_user(&shared.policy)?;
+
+    // Prepare filesystem: create and chown read_write directories.
+    prepare_filesystem(&shared.policy)?;
+
+    // The skill files are read by the entrypoint child, so install them
+    // before the child is spawned.
+    if agent_proposals_enabled() {
+        match skills::install_static_skills() {
+            Ok(installed) => {
+                info!(
+                    path = %installed.policy_advisor.display(),
+                    "Installed sandbox agent skill"
+                );
+            }
+            Err(error) => {
+                warn!(error = %error, "Failed to install sandbox agent skill");
+            }
         }
     } else {
-        None
-    };
+        debug!("agent_policy_proposals_enabled is false at startup; skipping skill install");
+    }
+
+    // Install the supervisor seccomp prelude after privileged startup helpers
+    // (network namespace setup, nftables probes) complete, but before the SSH
+    // listener and workload process are exposed.
+    apply_supervisor_startup_hardening()?;
 
     // Zombie reaper — openshell-sandbox may run as PID 1 in containers and
     // must reap orphaned grandchildren (e.g. background daemons started by
@@ -730,81 +844,76 @@ pub async fn run_sandbox(
     // Use waitid(..., WNOWAIT) so we can inspect exited children before
     // actually reaping them. This avoids racing explicit `child.wait()` calls
     // for managed children (entrypoint and SSH session processes).
-    //
-    // Network-only mode never spawns any children itself, so there is nothing
-    // to reap.
     #[cfg(target_os = "linux")]
-    if mode.has(SupervisorComponent::Process) {
-        tokio::spawn(async {
-            use nix::sys::wait::{Id, WaitPidFlag, WaitStatus, waitid, waitpid};
-            use tokio::signal::unix::{SignalKind, signal};
-            use tokio::time::MissedTickBehavior;
+    tokio::spawn(async {
+        use nix::sys::wait::{Id, WaitPidFlag, WaitStatus, waitid, waitpid};
+        use tokio::signal::unix::{SignalKind, signal};
+        use tokio::time::MissedTickBehavior;
 
-            let mut sigchld = match signal(SignalKind::child()) {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::warn!(error = %e, "Failed to register SIGCHLD handler for zombie reaping");
-                    return;
-                }
-            };
-            let mut retry = tokio::time::interval(Duration::from_secs(5));
-            retry.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        let mut sigchld = match signal(SignalKind::child()) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to register SIGCHLD handler for zombie reaping");
+                return;
+            }
+        };
+        let mut retry = tokio::time::interval(Duration::from_secs(5));
+        retry.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+        loop {
+            tokio::select! {
+                _ = sigchld.recv() => {}
+                _ = retry.tick() => {}
+            }
 
             loop {
-                tokio::select! {
-                    _ = sigchld.recv() => {}
-                    _ = retry.tick() => {}
-                }
-
-                loop {
-                    let status = match waitid(
-                        Id::All,
-                        WaitPidFlag::WEXITED | WaitPidFlag::WNOHANG | WaitPidFlag::WNOWAIT,
-                    ) {
-                        Ok(WaitStatus::StillAlive) | Err(nix::errno::Errno::ECHILD) => break,
-                        Ok(status) => status,
-                        Err(nix::errno::Errno::EINTR) => continue,
-                        Err(e) => {
-                            tracing::debug!(error = %e, "waitid error during zombie reaping");
-                            break;
-                        }
-                    };
-
-                    let Some(pid) = status.pid() else {
-                        break;
-                    };
-
-                    if is_managed_child(pid.as_raw()) {
-                        // Let the explicit waiter own this child status.
+                let status = match waitid(
+                    Id::All,
+                    WaitPidFlag::WEXITED | WaitPidFlag::WNOHANG | WaitPidFlag::WNOWAIT,
+                ) {
+                    Ok(WaitStatus::StillAlive) | Err(nix::errno::Errno::ECHILD) => break,
+                    Ok(status) => status,
+                    Err(nix::errno::Errno::EINTR) => continue,
+                    Err(e) => {
+                        tracing::debug!(error = %e, "waitid error during zombie reaping");
                         break;
                     }
+                };
 
-                    match waitpid(pid, Some(WaitPidFlag::WNOHANG)) {
-                        Ok(WaitStatus::StillAlive)
-                        | Err(nix::errno::Errno::ECHILD | nix::errno::Errno::EINTR) => {}
-                        Ok(reaped) => {
-                            tracing::debug!(?reaped, "Reaped orphaned child process");
-                        }
-                        Err(e) => {
-                            tracing::debug!(error = %e, "waitpid error during orphan reap");
-                            break;
-                        }
+                let Some(pid) = status.pid() else {
+                    break;
+                };
+
+                if is_managed_child(pid.as_raw()) {
+                    // Let the explicit waiter own this child status.
+                    break;
+                }
+
+                match waitpid(pid, Some(WaitPidFlag::WNOHANG)) {
+                    Ok(WaitStatus::StillAlive)
+                    | Err(nix::errno::Errno::ECHILD | nix::errno::Errno::EINTR) => {}
+                    Ok(reaped) => {
+                        tracing::debug!(?reaped, "Reaped orphaned child process");
+                    }
+                    Err(e) => {
+                        tracing::debug!(error = %e, "waitpid error during orphan reap");
+                        break;
                     }
                 }
             }
-        });
-    }
+        }
+    });
 
-    let ssh_socket_path: Option<std::path::PathBuf> = ssh_socket_path.map(std::path::PathBuf::from);
-    if mode.has(SupervisorComponent::Process)
-        && let Some(listen_path) = ssh_socket_path.clone()
-    {
-        let policy_clone = policy.clone();
-        let workdir_clone = workdir.clone();
-        let proxy_url = ssh_proxy_url;
+    if let Some(listen_path) = ssh_socket_path.clone() {
+        let policy_clone = shared.policy.clone();
+        let workdir_clone = workdir.map(str::to_owned);
+        let proxy_url = ssh_proxy_url.clone();
+        #[cfg(target_os = "linux")]
         let netns_fd = ssh_netns_fd;
+        #[cfg(not(target_os = "linux"))]
+        let netns_fd: Option<i32> = None;
         let ca_paths = ca_file_paths.clone();
-        let ssh_provider_env = provider_credentials.snapshot().child_env.clone();
+        let ssh_provider_env = shared.provider_credentials.snapshot().child_env.clone();
 
         let (ssh_ready_tx, ssh_ready_rx) = tokio::sync::oneshot::channel();
 
@@ -864,65 +973,59 @@ pub async fn run_sandbox(
 
     // Spawn the persistent supervisor session if we have a gateway endpoint
     // and sandbox identity. The session provides relay channels for SSH
-    // connect and ExecSandbox through the gateway, so it only runs alongside
-    // the SSH server (Process mode).
-    if mode.has(SupervisorComponent::Process)
-        && let (Some(channel), Some(id), Some(socket)) = (
-            gateway_channel.as_ref(),
-            sandbox_id.as_ref(),
-            ssh_socket_path.as_ref(),
-        )
-    {
-        supervisor_session::spawn(channel.clone(), id.clone(), socket.clone(), ssh_netns_fd);
+    // connect and ExecSandbox through the gateway.
+    if let (Some(channel), Some(id), Some(socket)) = (
+        shared.gateway_channel.as_ref(),
+        shared.sandbox_id.as_ref(),
+        ssh_socket_path.as_ref(),
+    ) {
+        #[cfg(target_os = "linux")]
+        let netns_fd = ssh_netns_fd;
+        #[cfg(not(target_os = "linux"))]
+        let netns_fd: Option<i32> = None;
+        supervisor_session::spawn(channel.clone(), id.clone(), socket.clone(), netns_fd);
         info!("supervisor session task spawned");
     }
 
-    // Spawn the entrypoint child only when this process is responsible for
-    // it. Network-only mode runs the proxy/OPA stack alongside an externally
-    // managed workload (or no workload at all) and never spawns directly.
-    let mut handle: Option<ProcessHandle> =
-        if mode.has(SupervisorComponent::Process) {
-            #[cfg(target_os = "linux")]
-            let h = ProcessHandle::spawn(
-                program,
-                args,
-                workdir.as_deref(),
-                interactive,
-                &policy,
-                netns.as_ref(),
-                ca_file_paths.as_ref(),
-                &provider_env,
-            )?;
+    // Spawn the entrypoint child.
+    let provider_env = shared.provider_credentials.snapshot().child_env.clone();
+    #[cfg(target_os = "linux")]
+    let h = ProcessHandle::spawn(
+        program,
+        args,
+        workdir,
+        interactive,
+        &shared.policy,
+        shared.netns.as_ref(),
+        ca_file_paths.as_ref(),
+        &provider_env,
+    )?;
 
-            #[cfg(not(target_os = "linux"))]
-            let h = ProcessHandle::spawn(
-                program,
-                args,
-                workdir.as_deref(),
-                interactive,
-                &policy,
-                ca_file_paths.as_ref(),
-                &provider_env,
-            )?;
+    #[cfg(not(target_os = "linux"))]
+    let h = ProcessHandle::spawn(
+        program,
+        args,
+        workdir,
+        interactive,
+        &shared.policy,
+        ca_file_paths.as_ref(),
+        &provider_env,
+    )?;
 
-            // Store the entrypoint PID so the proxy can resolve TCP peer identity
-            entrypoint_pid.store(h.pid(), Ordering::Release);
-            ocsf_emit!(
-                ProcessActivityBuilder::new(ocsf_ctx())
-                    .activity(ActivityId::Open)
-                    .action(ActionId::Allowed)
-                    .disposition(DispositionId::Allowed)
-                    .severity(SeverityId::Informational)
-                    .status(StatusId::Success)
-                    .launch_type(LaunchTypeId::Spawn)
-                    .process(OcsfProcess::new(program, i64::from(h.pid())))
-                    .message(format!("Process started: pid={}", h.pid()))
-                    .build()
-            );
-            Some(h)
-        } else {
-            None
-        };
+    // Store the entrypoint PID so the proxy can resolve TCP peer identity.
+    shared.entrypoint_pid.store(h.pid(), Ordering::Release);
+    ocsf_emit!(
+        ProcessActivityBuilder::new(ocsf_ctx())
+            .activity(ActivityId::Open)
+            .action(ActionId::Allowed)
+            .disposition(DispositionId::Allowed)
+            .severity(SeverityId::Informational)
+            .status(StatusId::Success)
+            .launch_type(LaunchTypeId::Spawn)
+            .process(OcsfProcess::new(program, i64::from(h.pid())))
+            .message(format!("Process started: pid={}", h.pid()))
+            .build()
+    );
 
     // Spawn a task to resolve policy binary symlinks after the container
     // filesystem becomes accessible via /proc/<pid>/root/. This expands
@@ -933,15 +1036,10 @@ pub async fn run_sandbox(
     // just been spawned and its mount namespace / procfs entries may not
     // be fully populated yet. Instead, we probe with retries until
     // /proc/<pid>/root/ is accessible or we exhaust attempts.
-    //
-    // Network-only mode never spawns the entrypoint child, so the pid would
-    // be zero and the probe would never succeed; skip the task entirely.
-    if mode.has(SupervisorComponent::Process)
-        && let (Some(engine), Some(proto)) = (&opa_engine, &retained_proto)
-    {
+    if let (Some(engine), Some(proto)) = (&shared.opa_engine, &shared.retained_proto) {
         let resolve_engine = engine.clone();
         let resolve_proto = proto.clone();
-        let resolve_pid = entrypoint_pid.clone();
+        let resolve_pid = shared.entrypoint_pid.clone();
         tokio::spawn(async move {
             let pid = resolve_pid.load(Ordering::Acquire);
             let probe_path = format!("/proc/{pid}/root/");
@@ -989,88 +1087,109 @@ pub async fn run_sandbox(
         });
     }
 
-    // Spawn background policy poll task (gRPC mode only).
-    if let (Some(id), Some(channel), Some(engine)) =
-        (&sandbox_id, gateway_channel.as_ref(), &opa_engine)
-    {
-        let poll_id = id.clone();
-        let poll_channel = channel.clone();
-        let poll_engine = engine.clone();
-        let poll_ocsf_enabled = ocsf_enabled.clone();
-        let poll_pid = entrypoint_pid.clone();
-        let poll_provider_credentials = provider_credentials.clone();
-        let poll_policy_local = policy_local_ctx.clone();
-        let poll_interval_secs: u64 = std::env::var("OPENSHELL_POLICY_POLL_INTERVAL_SECS")
+    Ok(ProcessContext { handle: h })
+}
+
+/// Spawn the background policy poll task, and — when a denial channel from
+/// the proxy is available — the denial aggregator that flushes summaries to
+/// the gateway. Both run in any mode whose inputs (sandbox id, gateway
+/// channel, OPA engine) are present.
+#[allow(clippy::similar_names)]
+fn spawn_policy_poll_loop(
+    shared: &SharedContext,
+    ocsf_enabled: Arc<std::sync::atomic::AtomicBool>,
+    denial_rx: Option<tokio::sync::mpsc::UnboundedReceiver<openshell_core::DenialEvent>>,
+) {
+    let Some(((id, channel), engine)) = shared
+        .sandbox_id
+        .as_ref()
+        .zip(shared.gateway_channel.as_ref())
+        .zip(shared.opa_engine.as_ref())
+    else {
+        return;
+    };
+
+    let poll_id = id.clone();
+    let poll_channel = channel.clone();
+    let poll_engine = engine.clone();
+    let poll_ocsf_enabled = ocsf_enabled;
+    let poll_pid = shared.entrypoint_pid.clone();
+    let poll_provider_credentials = shared.provider_credentials.clone();
+    let poll_policy_local = shared.policy_local_ctx.clone();
+    let poll_interval_secs: u64 = std::env::var("OPENSHELL_POLICY_POLL_INTERVAL_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(10);
+    let poll_ctx = PolicyPollLoopContext {
+        channel: poll_channel,
+        sandbox_id: poll_id,
+        opa_engine: poll_engine,
+        entrypoint_pid: poll_pid,
+        interval_secs: poll_interval_secs,
+        ocsf_enabled: poll_ocsf_enabled,
+        provider_credentials: poll_provider_credentials,
+        policy_local_ctx: Some(poll_policy_local),
+    };
+
+    tokio::spawn(async move {
+        if let Err(e) = run_policy_poll_loop(poll_ctx).await {
+            ocsf_emit!(
+                AppLifecycleBuilder::new(ocsf_ctx())
+                    .activity(ActivityId::Fail)
+                    .severity(SeverityId::Medium)
+                    .status(StatusId::Failure)
+                    .message(format!("Policy poll loop exited with error: {e}"))
+                    .build()
+            );
+        }
+    });
+
+    // Spawn denial aggregator only when the proxy created a denial channel.
+    // The aggregator drains denial events from the proxy, so it only makes
+    // sense alongside the proxy itself.
+    if let Some(rx) = denial_rx {
+        // SubmitPolicyAnalysis resolves by sandbox *name*, not UUID.
+        let agg_name = shared
+            .sandbox_name_for_agg
+            .clone()
+            .unwrap_or_else(|| id.clone());
+        let agg_channel = channel.clone();
+        let flush_interval_secs: u64 = std::env::var("OPENSHELL_DENIAL_FLUSH_INTERVAL_SECS")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(10);
-        let poll_ctx = PolicyPollLoopContext {
-            channel: poll_channel,
-            sandbox_id: poll_id,
-            opa_engine: poll_engine,
-            entrypoint_pid: poll_pid,
-            interval_secs: poll_interval_secs,
-            ocsf_enabled: poll_ocsf_enabled,
-            provider_credentials: poll_provider_credentials,
-            policy_local_ctx: Some(poll_policy_local),
-        };
+
+        let aggregator = denial_aggregator::DenialAggregator::new(rx, flush_interval_secs);
 
         tokio::spawn(async move {
-            if let Err(e) = run_policy_poll_loop(poll_ctx).await {
-                ocsf_emit!(
-                    AppLifecycleBuilder::new(ocsf_ctx())
-                        .activity(ActivityId::Fail)
-                        .severity(SeverityId::Medium)
-                        .status(StatusId::Failure)
-                        .message(format!("Policy poll loop exited with error: {e}"))
-                        .build()
-                );
-            }
-        });
-
-        // Spawn denial aggregator (gRPC mode only, when proxy is active).
-        // The aggregator drains denial events from the proxy, so it only
-        // makes sense alongside the proxy itself.
-        if mode.has(SupervisorComponent::Network)
-            && let Some(rx) = denial_rx
-        {
-            // SubmitPolicyAnalysis resolves by sandbox *name*, not UUID.
-            let agg_name = sandbox_name_for_agg.clone().unwrap_or_else(|| id.clone());
-            let agg_channel = channel.clone();
-            let flush_interval_secs: u64 = std::env::var("OPENSHELL_DENIAL_FLUSH_INTERVAL_SECS")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(10);
-
-            let aggregator = denial_aggregator::DenialAggregator::new(rx, flush_interval_secs);
-
-            tokio::spawn(async move {
-                aggregator
-                    .run(|summaries| {
-                        let channel = agg_channel.clone();
-                        let sandbox_name = agg_name.clone();
-                        async move {
-                            if let Err(e) =
-                                flush_proposals_to_gateway(channel, &sandbox_name, summaries).await
-                            {
-                                warn!(error = %e, "Failed to flush denial summaries to gateway");
-                            }
+            aggregator
+                .run(|summaries| {
+                    let channel = agg_channel.clone();
+                    let sandbox_name = agg_name.clone();
+                    async move {
+                        if let Err(e) =
+                            flush_proposals_to_gateway(channel, &sandbox_name, summaries).await
+                        {
+                            warn!(error = %e, "Failed to flush denial summaries to gateway");
                         }
-                    })
-                    .await;
-            });
-        }
+                    }
+                })
+                .await;
+        });
     }
+}
 
-    // Wait for process with optional timeout, or for an external shutdown
-    // signal in Network-only mode (where there is no entrypoint child).
-    let Some(mut handle) = handle.take() else {
+/// Wait for the entrypoint to exit (with optional timeout) and return its
+/// exit code, or — when no entrypoint was spawned (Network-only mode) —
+/// block on a shutdown signal so the proxy and poll loop stay alive.
+async fn run_until_shutdown(process: Option<ProcessContext>, timeout_secs: u64) -> Result<i32> {
+    let Some(ProcessContext { handle: mut h }) = process else {
         wait_for_shutdown_signal().await;
         return Ok(0);
     };
 
     let result = if timeout_secs > 0 {
-        if let Ok(result) = timeout(Duration::from_secs(timeout_secs), handle.wait()).await {
+        if let Ok(result) = timeout(Duration::from_secs(timeout_secs), h.wait()).await {
             result
         } else {
             ocsf_emit!(
@@ -1083,11 +1202,11 @@ pub async fn run_sandbox(
                     .message("Process timed out, killing")
                     .build()
             );
-            handle.kill()?;
+            h.kill()?;
             return Ok(124); // Standard timeout exit code
         }
     } else {
-        handle.wait().await
+        h.wait().await
     };
 
     let status = result.into_diagnostic()?;
