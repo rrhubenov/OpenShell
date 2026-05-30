@@ -5,7 +5,6 @@
 //!
 //! This crate provides process sandboxing and monitoring capabilities.
 
-pub mod bypass_monitor;
 pub mod debug_rpc;
 pub mod l7;
 pub mod opa;
@@ -396,7 +395,7 @@ async fn run_networking(
     // tracing events for direct connection attempts that bypass the proxy.
     #[cfg(target_os = "linux")]
     let bypass_monitor_handle = netns.and_then(|ns| {
-        bypass_monitor::spawn(
+        openshell_supervisor_process::bypass_monitor::spawn(
             ns.name().to_string(),
             entrypoint_pid.clone(),
             bypass_denial_tx,

@@ -130,7 +130,7 @@ pub fn spawn(
         .status();
 
     if !dmesg_check.is_ok_and(|s| s.success()) {
-        let event = NetworkActivityBuilder::new(crate::ocsf_ctx())
+        let event = NetworkActivityBuilder::new(openshell_ocsf::ctx::ctx())
             .activity(ActivityId::Other)
             .severity(SeverityId::Low)
             .message(
@@ -158,7 +158,7 @@ pub fn spawn(
         {
             Ok(c) => c,
             Err(e) => {
-                let event = NetworkActivityBuilder::new(crate::ocsf_ctx())
+                let event = NetworkActivityBuilder::new(openshell_ocsf::ctx::ctx())
                     .activity(ActivityId::Other)
                     .severity(SeverityId::Low)
                     .message(format!(
@@ -171,7 +171,7 @@ pub fn spawn(
         };
 
         let Some(stdout) = child.stdout.take() else {
-            let event = NetworkActivityBuilder::new(crate::ocsf_ctx())
+            let event = NetworkActivityBuilder::new(openshell_ocsf::ctx::ctx())
                 .activity(ActivityId::Other)
                 .severity(SeverityId::Low)
                 .message("dmesg --follow produced no stdout; bypass monitor will not run")
@@ -214,7 +214,7 @@ pub fn spawn(
                     Endpoint::from_domain(&event.dst_addr, event.dst_port)
                 };
 
-                let net_event = NetworkActivityBuilder::new(crate::ocsf_ctx())
+                let net_event = NetworkActivityBuilder::new(openshell_ocsf::ctx::ctx())
                     .activity(ActivityId::Refuse)
                     .action(ActionId::Denied)
                     .disposition(DispositionId::Blocked)
@@ -230,7 +230,7 @@ pub fn spawn(
                     .build();
                 ocsf_emit!(net_event);
 
-                let finding_event = DetectionFindingBuilder::new(crate::ocsf_ctx())
+                let finding_event = DetectionFindingBuilder::new(openshell_ocsf::ctx::ctx())
                     .activity(ActivityId::Open)
                     .action(ActionId::Denied)
                     .disposition(DispositionId::Blocked)
