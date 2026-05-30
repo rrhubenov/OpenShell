@@ -275,6 +275,274 @@ fn is_managed_child(pid: i32) -> bool {
         .is_ok_and(|children| children.contains(&pid))
 }
 
+/// Handles and values produced by [`run_networking`] that the rest of
+/// `run_sandbox` consumes.
+///
+/// The two `_proxy` / `_bypass_monitor` fields are RAII handles whose drop
+/// tears down the proxy and bypass-monitor tasks. They must remain alive for
+/// the duration of the sandbox wait loop, which is achieved by holding the
+/// returned `Networking` value in `run_sandbox`'s frame.
+struct Networking {
+    #[allow(dead_code, reason = "RAII handle: drop tears down the proxy task")]
+    _proxy: Option<ProxyHandle>,
+    #[cfg(target_os = "linux")]
+    #[allow(dead_code, reason = "RAII handle: drop joins the bypass monitor task")]
+    _bypass_monitor: Option<tokio::task::JoinHandle<()>>,
+
+    #[cfg(target_os = "linux")]
+    netns: Option<NetworkNamespace>,
+    ca_file_paths: Option<(std::path::PathBuf, std::path::PathBuf)>,
+    ssh_proxy_url: Option<String>,
+    ssh_netns_fd: Option<i32>,
+    denial_rx: Option<tokio::sync::mpsc::UnboundedReceiver<denial_aggregator::DenialEvent>>,
+}
+
+/// Set up the networking stack: ephemeral CA + TLS state, network namespace,
+/// proxy server, bypass monitor, and the SSH-side proxy URL / netns FD.
+#[allow(clippy::too_many_arguments)]
+async fn run_networking(
+    policy: &SandboxPolicy,
+    opa_engine: Option<&Arc<OpaEngine>>,
+    entrypoint_pid: Arc<AtomicU32>,
+    provider_credentials: &provider_credentials::ProviderCredentialState,
+    policy_local_ctx: &Arc<policy_local::PolicyLocalContext>,
+    sandbox_id: Option<&str>,
+    openshell_endpoint: Option<&str>,
+    inference_routes: Option<&str>,
+) -> Result<Networking> {
+    // Identity cache for SHA256 TOFU when OPA is active. Only consumed by
+    // the proxy, so it's owned here.
+    let identity_cache = opa_engine.map(|_| Arc::new(BinaryIdentityCache::new()));
+
+    // Generate ephemeral CA and TLS state for HTTPS L7 inspection.
+    // The CA cert is written to disk so sandbox processes can trust it.
+    let (tls_state, ca_file_paths) = if matches!(policy.network.mode, NetworkMode::Proxy) {
+        match SandboxCa::generate() {
+            Ok(ca) => {
+                let tls_dir = std::path::Path::new("/etc/openshell-tls");
+                let system_ca_bundle = read_system_ca_bundle();
+                match write_ca_files(&ca, tls_dir, &system_ca_bundle) {
+                    Ok(paths) => {
+                        // /etc/openshell-tls is subsumed by the /etc baseline
+                        // path injected by enrich_*_baseline_paths(), so no
+                        // explicit Landlock entry is needed here.
+
+                        let upstream_config = build_upstream_client_config(&system_ca_bundle);
+                        let cert_cache = CertCache::new(ca);
+                        let state = Arc::new(ProxyTlsState::new(cert_cache, upstream_config));
+                        ocsf_emit!(
+                            ConfigStateChangeBuilder::new(ocsf_ctx())
+                                .severity(SeverityId::Informational)
+                                .status(StatusId::Success)
+                                .state(StateId::Enabled, "enabled")
+                                .message("TLS termination enabled: ephemeral CA generated")
+                                .build()
+                        );
+                        (Some(state), Some(paths))
+                    }
+                    Err(e) => {
+                        ocsf_emit!(
+                            ConfigStateChangeBuilder::new(ocsf_ctx())
+                                .severity(SeverityId::Medium)
+                                .status(StatusId::Failure)
+                                .state(StateId::Disabled, "disabled")
+                                .message(format!(
+                                    "Failed to write CA files, TLS termination disabled: {e}"
+                                ))
+                                .build()
+                        );
+                        (None, None)
+                    }
+                }
+            }
+            Err(e) => {
+                ocsf_emit!(
+                    ConfigStateChangeBuilder::new(ocsf_ctx())
+                        .severity(SeverityId::Medium)
+                        .status(StatusId::Failure)
+                        .state(StateId::Disabled, "disabled")
+                        .message(format!(
+                            "Failed to generate ephemeral CA, TLS termination disabled: {e}"
+                        ))
+                        .build()
+                );
+                (None, None)
+            }
+        }
+    } else {
+        (None, None)
+    };
+
+    // Create network namespace for proxy mode (Linux only).
+    // This must be created before the proxy AND SSH server so that SSH
+    // sessions can enter the namespace for network isolation.
+    #[cfg(target_os = "linux")]
+    let netns = if matches!(policy.network.mode, NetworkMode::Proxy) {
+        match NetworkNamespace::create() {
+            Ok(ns) => {
+                // Install bypass detection rules (nftables log + reject).
+                // This provides fast-fail UX and diagnostic logging for direct
+                // connection attempts that bypass the HTTP CONNECT proxy.
+                let proxy_port = policy
+                    .network
+                    .proxy
+                    .as_ref()
+                    .and_then(|p| p.http_addr)
+                    .map_or(3128, |addr| addr.port());
+                if let Err(e) = ns.install_bypass_rules(proxy_port) {
+                    ocsf_emit!(
+                        ConfigStateChangeBuilder::new(ocsf_ctx())
+                            .severity(SeverityId::Medium)
+                            .status(StatusId::Failure)
+                            .state(StateId::Disabled, "degraded")
+                            .message(format!(
+                                "Failed to install bypass detection rules (non-fatal): {e}"
+                            ))
+                            .build()
+                    );
+                }
+                Some(ns)
+            }
+            Err(e) => {
+                return Err(miette::miette!(
+                    "Network namespace creation failed and proxy mode requires isolation. \
+                     Ensure CAP_NET_ADMIN and CAP_SYS_ADMIN are available and iproute2 is installed. \
+                     Error: {e}"
+                ));
+            }
+        }
+    } else {
+        None
+    };
+
+    let (proxy_handle, denial_rx, bypass_denial_tx) =
+        if matches!(policy.network.mode, NetworkMode::Proxy) {
+            let proxy_policy = policy.network.proxy.as_ref().ok_or_else(|| {
+                miette::miette!(
+                    "Network mode is set to proxy but no proxy configuration was provided"
+                )
+            })?;
+
+            let engine = opa_engine.cloned().ok_or_else(|| {
+                miette::miette!("Proxy mode requires an OPA engine (--rego-policy and --rego-data)")
+            })?;
+
+            let cache = identity_cache.clone().ok_or_else(|| {
+                miette::miette!(
+                    "Proxy mode requires an identity cache (OPA engine must be configured)"
+                )
+            })?;
+
+            // If we have a network namespace, bind to the veth host IP so sandboxed
+            // processes can reach the proxy via TCP.
+            #[cfg(target_os = "linux")]
+            let bind_addr = netns.as_ref().map(|ns| {
+                let port = proxy_policy.http_addr.map_or(3128, |addr| addr.port());
+                SocketAddr::new(ns.host_ip(), port)
+            });
+
+            #[cfg(not(target_os = "linux"))]
+            let bind_addr: Option<SocketAddr> = None;
+
+            // Build inference context for local routing of intercepted inference calls.
+            let inference_ctx =
+                build_inference_context(sandbox_id, openshell_endpoint, inference_routes).await?;
+
+            // Create denial aggregator channel if in gRPC mode (sandbox_id present).
+            // Clone the sender for the bypass monitor before passing to the proxy.
+            let (denial_tx, denial_rx, bypass_denial_tx) = if sandbox_id.is_some() {
+                let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+                let bypass_tx = tx.clone();
+                (Some(tx), Some(rx), Some(bypass_tx))
+            } else {
+                (None, None, None)
+            };
+
+            let proxy_handle = ProxyHandle::start_with_bind_addr(
+                proxy_policy,
+                bind_addr,
+                engine,
+                cache,
+                entrypoint_pid.clone(),
+                tls_state,
+                inference_ctx,
+                Some(provider_credentials.clone()),
+                Some(policy_local_ctx.clone()),
+                denial_tx,
+            )
+            .await?;
+            (Some(proxy_handle), denial_rx, bypass_denial_tx)
+        } else {
+            (None, None, None)
+        };
+
+    // Spawn bypass detection monitor (Linux only, proxy mode only).
+    // Reads /dev/kmsg for nftables log entries and emits structured
+    // tracing events for direct connection attempts that bypass the proxy.
+    #[cfg(target_os = "linux")]
+    let bypass_monitor_handle = netns.as_ref().and_then(|ns| {
+        bypass_monitor::spawn(
+            ns.name().to_string(),
+            entrypoint_pid.clone(),
+            bypass_denial_tx,
+        )
+    });
+
+    // On non-Linux, bypass_denial_tx is unused (no /dev/kmsg).
+    #[cfg(not(target_os = "linux"))]
+    drop(bypass_denial_tx);
+
+    // Compute the proxy URL and netns fd for SSH sessions.
+    // SSH shell processes need both to enforce network policy:
+    // - netns_fd: enter the network namespace via setns() so all traffic
+    //   goes through the veth pair (hard enforcement, non-bypassable)
+    // - proxy_url: set proxy env vars so cooperative tools route through the
+    //   CONNECT proxy; this also opts Node.js into honoring those vars
+    #[cfg(target_os = "linux")]
+    let ssh_netns_fd = netns.as_ref().and_then(NetworkNamespace::ns_fd);
+
+    #[cfg(not(target_os = "linux"))]
+    let ssh_netns_fd: Option<i32> = None;
+
+    let ssh_proxy_url = if matches!(policy.network.mode, NetworkMode::Proxy) {
+        #[cfg(target_os = "linux")]
+        {
+            netns.as_ref().map(|ns| {
+                let port = policy
+                    .network
+                    .proxy
+                    .as_ref()
+                    .and_then(|p| p.http_addr)
+                    .map_or(3128, |addr| addr.port());
+                format!("http://{}:{port}", ns.host_ip())
+            })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            policy
+                .network
+                .proxy
+                .as_ref()
+                .and_then(|p| p.http_addr)
+                .map(|addr| format!("http://{addr}"))
+        }
+    } else {
+        None
+    };
+
+    Ok(Networking {
+        _proxy: proxy_handle,
+        #[cfg(target_os = "linux")]
+        _bypass_monitor: bypass_monitor_handle,
+        #[cfg(target_os = "linux")]
+        netns,
+        ca_file_paths,
+        ssh_proxy_url,
+        ssh_netns_fd,
+        denial_rx,
+    })
+}
+
 /// Run a command in the sandbox.
 ///
 /// # Errors
@@ -406,11 +674,6 @@ pub async fn run_sandbox(
     );
     let provider_env = provider_credentials.snapshot().child_env.clone();
 
-    // Create identity cache for SHA256 TOFU when OPA is active
-    let identity_cache = opa_engine
-        .as_ref()
-        .map(|_| Arc::new(BinaryIdentityCache::new()));
-
     // Prepare filesystem: create and chown read_write directories
     prepare_filesystem(&policy)?;
 
@@ -467,235 +730,26 @@ pub async fn run_sandbox(
         debug!("agent_policy_proposals_enabled is false at startup; skipping skill install");
     }
 
-    // Generate ephemeral CA and TLS state for HTTPS L7 inspection.
-    // The CA cert is written to disk so sandbox processes can trust it.
-    let (tls_state, ca_file_paths) = if matches!(policy.network.mode, NetworkMode::Proxy) {
-        match SandboxCa::generate() {
-            Ok(ca) => {
-                let tls_dir = std::path::Path::new("/etc/openshell-tls");
-                let system_ca_bundle = read_system_ca_bundle();
-                match write_ca_files(&ca, tls_dir, &system_ca_bundle) {
-                    Ok(paths) => {
-                        // /etc/openshell-tls is subsumed by the /etc baseline
-                        // path injected by enrich_*_baseline_paths(), so no
-                        // explicit Landlock entry is needed here.
+    // Shared PID: set after process spawn so the proxy can look up
+    // the entrypoint process's /proc/net/tcp for identity binding.
+    let entrypoint_pid = Arc::new(AtomicU32::new(0));
 
-                        let upstream_config = build_upstream_client_config(&system_ca_bundle);
-                        let cert_cache = CertCache::new(ca);
-                        let state = Arc::new(ProxyTlsState::new(cert_cache, upstream_config));
-                        ocsf_emit!(
-                            ConfigStateChangeBuilder::new(ocsf_ctx())
-                                .severity(SeverityId::Informational)
-                                .status(StatusId::Success)
-                                .state(StateId::Enabled, "enabled")
-                                .message("TLS termination enabled: ephemeral CA generated")
-                                .build()
-                        );
-                        (Some(state), Some(paths))
-                    }
-                    Err(e) => {
-                        ocsf_emit!(
-                            ConfigStateChangeBuilder::new(ocsf_ctx())
-                                .severity(SeverityId::Medium)
-                                .status(StatusId::Failure)
-                                .state(StateId::Disabled, "disabled")
-                                .message(format!(
-                                    "Failed to write CA files, TLS termination disabled: {e}"
-                                ))
-                                .build()
-                        );
-                        (None, None)
-                    }
-                }
-            }
-            Err(e) => {
-                ocsf_emit!(
-                    ConfigStateChangeBuilder::new(ocsf_ctx())
-                        .severity(SeverityId::Medium)
-                        .status(StatusId::Failure)
-                        .state(StateId::Disabled, "disabled")
-                        .message(format!(
-                            "Failed to generate ephemeral CA, TLS termination disabled: {e}"
-                        ))
-                        .build()
-                );
-                (None, None)
-            }
-        }
-    } else {
-        (None, None)
-    };
-
-    // Create network namespace for proxy mode (Linux only)
-    // This must be created before the proxy AND SSH server so that SSH
-    // sessions can enter the namespace for network isolation.
-    #[cfg(target_os = "linux")]
-    let netns = if matches!(policy.network.mode, NetworkMode::Proxy) {
-        match NetworkNamespace::create() {
-            Ok(ns) => {
-                // Install bypass detection rules (nftables log + reject).
-                // This provides fast-fail UX and diagnostic logging for direct
-                // connection attempts that bypass the HTTP CONNECT proxy.
-                let proxy_port = policy
-                    .network
-                    .proxy
-                    .as_ref()
-                    .and_then(|p| p.http_addr)
-                    .map_or(3128, |addr| addr.port());
-                if let Err(e) = ns.install_bypass_rules(proxy_port) {
-                    ocsf_emit!(
-                        ConfigStateChangeBuilder::new(ocsf_ctx())
-                            .severity(SeverityId::Medium)
-                            .status(StatusId::Failure)
-                            .state(StateId::Disabled, "degraded")
-                            .message(format!(
-                                "Failed to install bypass detection rules (non-fatal): {e}"
-                            ))
-                            .build()
-                    );
-                }
-                Some(ns)
-            }
-            Err(e) => {
-                return Err(miette::miette!(
-                    "Network namespace creation failed and proxy mode requires isolation. \
-                     Ensure CAP_NET_ADMIN and CAP_SYS_ADMIN are available and iproute2 is installed. \
-                     Error: {e}"
-                ));
-            }
-        }
-    } else {
-        None
-    };
-
-    // On non-Linux, network namespace isolation is not supported
-    #[cfg(not(target_os = "linux"))]
-    #[allow(clippy::no_effect_underscore_binding)]
-    let _netns: Option<()> = None;
+    let mut networking = run_networking(
+        &policy,
+        opa_engine.as_ref(),
+        entrypoint_pid.clone(),
+        &provider_credentials,
+        &policy_local_ctx,
+        sandbox_id.as_deref(),
+        openshell_endpoint_for_proxy.as_deref(),
+        inference_routes.as_deref(),
+    )
+    .await?;
 
     // Install the supervisor seccomp prelude after privileged startup helpers
     // (network namespace setup, nftables probes) complete, but before the SSH
     // listener and workload process are exposed.
     apply_supervisor_startup_hardening()?;
-
-    // Shared PID: set after process spawn so the proxy can look up
-    // the entrypoint process's /proc/net/tcp for identity binding.
-    let entrypoint_pid = Arc::new(AtomicU32::new(0));
-
-    let (_proxy, denial_rx, bypass_denial_tx) = if matches!(policy.network.mode, NetworkMode::Proxy)
-    {
-        let proxy_policy = policy.network.proxy.as_ref().ok_or_else(|| {
-            miette::miette!("Network mode is set to proxy but no proxy configuration was provided")
-        })?;
-
-        let engine = opa_engine.clone().ok_or_else(|| {
-            miette::miette!("Proxy mode requires an OPA engine (--rego-policy and --rego-data)")
-        })?;
-
-        let cache = identity_cache.clone().ok_or_else(|| {
-            miette::miette!("Proxy mode requires an identity cache (OPA engine must be configured)")
-        })?;
-
-        // If we have a network namespace, bind to the veth host IP so sandboxed
-        // processes can reach the proxy via TCP.
-        #[cfg(target_os = "linux")]
-        let bind_addr = netns.as_ref().map(|ns| {
-            let port = proxy_policy.http_addr.map_or(3128, |addr| addr.port());
-            SocketAddr::new(ns.host_ip(), port)
-        });
-
-        #[cfg(not(target_os = "linux"))]
-        let bind_addr: Option<SocketAddr> = None;
-
-        // Build inference context for local routing of intercepted inference calls.
-        let inference_ctx = build_inference_context(
-            sandbox_id.as_deref(),
-            openshell_endpoint_for_proxy.as_deref(),
-            inference_routes.as_deref(),
-        )
-        .await?;
-
-        // Create denial aggregator channel if in gRPC mode (sandbox_id present).
-        // Clone the sender for the bypass monitor before passing to the proxy.
-        let (denial_tx, denial_rx, bypass_denial_tx) = if sandbox_id.is_some() {
-            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-            let bypass_tx = tx.clone();
-            (Some(tx), Some(rx), Some(bypass_tx))
-        } else {
-            (None, None, None)
-        };
-
-        let proxy_handle = ProxyHandle::start_with_bind_addr(
-            proxy_policy,
-            bind_addr,
-            engine,
-            cache,
-            entrypoint_pid.clone(),
-            tls_state,
-            inference_ctx,
-            Some(provider_credentials.clone()),
-            Some(policy_local_ctx.clone()),
-            denial_tx,
-        )
-        .await?;
-        (Some(proxy_handle), denial_rx, bypass_denial_tx)
-    } else {
-        (None, None, None)
-    };
-
-    // Spawn bypass detection monitor (Linux only, proxy mode only).
-    // Reads /dev/kmsg for nftables log entries and emits structured
-    // tracing events for direct connection attempts that bypass the proxy.
-    #[cfg(target_os = "linux")]
-    let _bypass_monitor = netns.as_ref().and_then(|ns| {
-        bypass_monitor::spawn(
-            ns.name().to_string(),
-            entrypoint_pid.clone(),
-            bypass_denial_tx,
-        )
-    });
-
-    // On non-Linux, bypass_denial_tx is unused (no /dev/kmsg).
-    #[cfg(not(target_os = "linux"))]
-    drop(bypass_denial_tx);
-
-    // Compute the proxy URL and netns fd for SSH sessions.
-    // SSH shell processes need both to enforce network policy:
-    // - netns_fd: enter the network namespace via setns() so all traffic
-    //   goes through the veth pair (hard enforcement, non-bypassable)
-    // - proxy_url: set proxy env vars so cooperative tools route through the
-    //   CONNECT proxy; this also opts Node.js into honoring those vars
-    #[cfg(target_os = "linux")]
-    let ssh_netns_fd = netns.as_ref().and_then(NetworkNamespace::ns_fd);
-
-    #[cfg(not(target_os = "linux"))]
-    let ssh_netns_fd: Option<i32> = None;
-
-    let ssh_proxy_url = if matches!(policy.network.mode, NetworkMode::Proxy) {
-        #[cfg(target_os = "linux")]
-        {
-            netns.as_ref().map(|ns| {
-                let port = policy
-                    .network
-                    .proxy
-                    .as_ref()
-                    .and_then(|p| p.http_addr)
-                    .map_or(3128, |addr| addr.port());
-                format!("http://{}:{port}", ns.host_ip())
-            })
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            policy
-                .network
-                .proxy
-                .as_ref()
-                .and_then(|p| p.http_addr)
-                .map(|addr| format!("http://{addr}"))
-        }
-    } else {
-        None
-    };
 
     // Zombie reaper — openshell-sandbox may run as PID 1 in containers and
     // must reap orphaned grandchildren (e.g. background daemons started by
@@ -768,9 +822,9 @@ pub async fn run_sandbox(
     if let Some(listen_path) = ssh_socket_path.clone() {
         let policy_clone = policy.clone();
         let workdir_clone = workdir.clone();
-        let proxy_url = ssh_proxy_url;
-        let netns_fd = ssh_netns_fd;
-        let ca_paths = ca_file_paths.clone();
+        let proxy_url = networking.ssh_proxy_url.take();
+        let netns_fd = networking.ssh_netns_fd;
+        let ca_paths = networking.ca_file_paths.clone();
         let provider_credentials_clone = provider_credentials.clone();
 
         let (ssh_ready_tx, ssh_ready_rx) = tokio::sync::oneshot::channel();
@@ -837,7 +891,12 @@ pub async fn run_sandbox(
         sandbox_id.as_ref(),
         ssh_socket_path.as_ref(),
     ) {
-        supervisor_session::spawn(endpoint.clone(), id.clone(), socket.clone(), ssh_netns_fd);
+        supervisor_session::spawn(
+            endpoint.clone(),
+            id.clone(),
+            socket.clone(),
+            networking.ssh_netns_fd,
+        );
         info!("supervisor session task spawned");
     }
 
@@ -848,8 +907,8 @@ pub async fn run_sandbox(
         workdir.as_deref(),
         interactive,
         &policy,
-        netns.as_ref(),
-        ca_file_paths.as_ref(),
+        networking.netns.as_ref(),
+        networking.ca_file_paths.as_ref(),
         &provider_env,
     )?;
 
@@ -860,7 +919,7 @@ pub async fn run_sandbox(
         workdir.as_deref(),
         interactive,
         &policy,
-        ca_file_paths.as_ref(),
+        networking.ca_file_paths.as_ref(),
         &provider_env,
     )?;
 
@@ -979,7 +1038,7 @@ pub async fn run_sandbox(
         });
 
         // Spawn denial aggregator (gRPC mode only, when proxy is active).
-        if let Some(rx) = denial_rx {
+        if let Some(rx) = networking.denial_rx.take() {
             // SubmitPolicyAnalysis resolves by sandbox *name*, not UUID.
             let agg_name = sandbox_name_for_agg.clone().unwrap_or_else(|| id.clone());
             let agg_endpoint = endpoint.clone();
