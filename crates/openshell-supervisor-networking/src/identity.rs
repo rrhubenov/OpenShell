@@ -8,8 +8,8 @@
 //! path must match the cached hash. A mismatch indicates the binary was replaced
 //! mid-sandbox and the request is denied.
 
-use openshell_core::procfs;
 use miette::Result;
+use openshell_core::procfs;
 use std::collections::HashMap;
 use std::fs::Metadata;
 #[cfg(unix)]
