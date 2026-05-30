@@ -12,8 +12,8 @@
 //!    needed syscalls (`execveat+AT_EMPTY_PATH`, `unshare+CLONE_NEWUSER`,
 //!    `seccomp+SET_MODE_FILTER`)
 
-use crate::policy::{NetworkMode, SandboxPolicy};
 use miette::{IntoDiagnostic, Result};
+use openshell_core::policy::{NetworkMode, SandboxPolicy};
 use seccompiler::{
     SeccompAction, SeccompCmpArgLen, SeccompCmpOp, SeccompCondition, SeccompFilter, SeccompRule,
     apply_filter, apply_filter_all_threads,

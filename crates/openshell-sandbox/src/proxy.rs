@@ -7,12 +7,12 @@ use crate::denial_aggregator::DenialEvent;
 use crate::identity::BinaryIdentityCache;
 use crate::l7::tls::ProxyTlsState;
 use crate::opa::{NetworkAction, OpaEngine, PolicyGenerationGuard};
-use crate::policy::ProxyPolicy;
 use crate::policy_local::{POLICY_LOCAL_HOST, PolicyLocalContext};
 use crate::provider_credentials::ProviderCredentialState;
 use crate::secrets::{SecretResolver, rewrite_header_line_checked};
 use miette::{IntoDiagnostic, Result};
 use openshell_core::net::{is_always_blocked_ip, is_internal_ip, is_link_local_ip};
+use openshell_core::policy::ProxyPolicy;
 use openshell_ocsf::{
     ActionId, ActivityId, DispositionId, Endpoint, HttpActivityBuilder, HttpRequest,
     NetworkActivityBuilder, Process, SeverityId, StatusId, Url as OcsfUrl, ocsf_emit,

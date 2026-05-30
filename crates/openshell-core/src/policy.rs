@@ -3,7 +3,8 @@
 
 //! Sandbox policy configuration.
 
-use openshell_core::proto::{
+use crate::paths::normalize_path;
+use crate::proto::{
     FilesystemPolicy as ProtoFilesystemPolicy, LandlockPolicy as ProtoLandlockPolicy,
     ProcessPolicy as ProtoProcessPolicy, SandboxPolicy as ProtoSandboxPolicy,
 };
@@ -125,12 +126,12 @@ impl From<ProtoFilesystemPolicy> for FilesystemPolicy {
             read_only: proto
                 .read_only
                 .into_iter()
-                .map(|p| PathBuf::from(openshell_policy::normalize_path(&p)))
+                .map(|p| PathBuf::from(normalize_path(&p)))
                 .collect(),
             read_write: proto
                 .read_write
                 .into_iter()
-                .map(|p| PathBuf::from(openshell_policy::normalize_path(&p)))
+                .map(|p| PathBuf::from(normalize_path(&p)))
                 .collect(),
             include_workdir: proto.include_workdir,
         }

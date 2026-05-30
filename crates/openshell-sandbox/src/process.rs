@@ -4,10 +4,10 @@
 //! Process management and signal handling.
 
 use crate::child_env;
-use crate::policy::{NetworkMode, SandboxPolicy};
 use crate::sandbox;
 #[cfg(target_os = "linux")]
 use crate::sandbox::linux::netns::NetworkNamespace;
+use openshell_core::policy::{NetworkMode, SandboxPolicy};
 #[cfg(target_os = "linux")]
 use crate::{register_managed_child, unregister_managed_child};
 use miette::{IntoDiagnostic, Result};
@@ -658,7 +658,7 @@ impl From<std::process::ExitStatus> for ProcessStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::policy::{
+    use openshell_core::policy::{
         FilesystemPolicy, LandlockPolicy, NetworkPolicy, ProcessPolicy, SandboxPolicy,
     };
     #[cfg(unix)]

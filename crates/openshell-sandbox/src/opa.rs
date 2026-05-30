@@ -7,8 +7,8 @@
 //! access decisions. The engine is loaded once at sandbox startup and queried
 //! on every proxy CONNECT request.
 
-use crate::policy::{FilesystemPolicy, LandlockCompatibility, LandlockPolicy, ProcessPolicy};
 use miette::Result;
+use openshell_core::policy::{FilesystemPolicy, LandlockCompatibility, LandlockPolicy, ProcessPolicy};
 use openshell_core::proto::SandboxPolicy as ProtoSandboxPolicy;
 use std::path::{Path, PathBuf};
 use std::sync::{

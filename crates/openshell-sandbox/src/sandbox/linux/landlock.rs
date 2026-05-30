@@ -3,11 +3,11 @@
 
 //! Landlock filesystem sandboxing.
 
-use crate::policy::{LandlockCompatibility, SandboxPolicy};
 use landlock::{
     ABI, Access, AccessFs, CompatLevel, Compatible, PathBeneath, PathFd, PathFdError, Ruleset,
     RulesetAttr, RulesetCreatedAttr,
 };
+use openshell_core::policy::{LandlockCompatibility, SandboxPolicy};
 use miette::{IntoDiagnostic, Result};
 use std::path::{Path, PathBuf};
 use tracing::debug;
