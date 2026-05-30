@@ -18,8 +18,11 @@ thiserror = { workspace = true }
 miette = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+tracing = { workspace = true }
 url = { workspace = true }
 ipnet = "2"
+hex = "0.4"
+sha2 = { workspace = true }
 
 [features]
 ## Include test-only settings (dummy_bool, dummy_int) in the registry.

@@ -15,7 +15,6 @@ pub mod log_push;
 pub mod opa;
 mod policy_local;
 mod process;
-pub mod procfs;
 mod provider_credentials;
 pub mod proxy;
 mod sandbox;

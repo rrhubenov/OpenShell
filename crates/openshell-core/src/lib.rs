@@ -22,6 +22,7 @@ pub mod metadata;
 pub mod net;
 pub mod paths;
 pub mod policy;
+pub mod procfs;
 pub mod progress;
 pub mod proto;
 pub mod sandbox_env;

@@ -8,7 +8,7 @@
 //! path must match the cached hash. A mismatch indicates the binary was replaced
 //! mid-sandbox and the request is denied.
 
-use crate::procfs;
+use openshell_core::procfs;
 use miette::Result;
 use std::collections::HashMap;
 use std::fs::Metadata;
@@ -169,7 +169,7 @@ impl BinaryIdentityCache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::procfs;
+    use openshell_core::procfs;
     use std::io::Write;
     use std::time::Duration;
 
