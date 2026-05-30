@@ -14,8 +14,6 @@ mod sandbox;
 mod ssh;
 
 use miette::{IntoDiagnostic, Result};
-#[cfg(target_os = "linux")]
-use std::collections::HashSet;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -146,41 +144,7 @@ fn route_refresh_interval_secs() -> u64 {
 }
 
 #[cfg(target_os = "linux")]
-static MANAGED_CHILDREN: LazyLock<Mutex<HashSet<i32>>> =
-    LazyLock::new(|| Mutex::new(HashSet::new()));
-
-#[cfg(target_os = "linux")]
-pub(crate) fn register_managed_child(pid: u32) {
-    let Ok(pid) = i32::try_from(pid) else {
-        return;
-    };
-    if pid <= 0 {
-        return;
-    }
-    if let Ok(mut children) = MANAGED_CHILDREN.lock() {
-        children.insert(pid);
-    }
-}
-
-#[cfg(target_os = "linux")]
-pub(crate) fn unregister_managed_child(pid: u32) {
-    let Ok(pid) = i32::try_from(pid) else {
-        return;
-    };
-    if pid <= 0 {
-        return;
-    }
-    if let Ok(mut children) = MANAGED_CHILDREN.lock() {
-        children.remove(&pid);
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn is_managed_child(pid: i32) -> bool {
-    MANAGED_CHILDREN
-        .lock()
-        .is_ok_and(|children| children.contains(&pid))
-}
+use openshell_supervisor_process::managed_children;
 
 /// Handles and values produced by [`run_networking`] that the rest of
 /// `run_sandbox` consumes.
@@ -533,7 +497,7 @@ async fn run_process(
                     break;
                 };
 
-                if is_managed_child(pid.as_raw()) {
+                if managed_children::is_managed(pid.as_raw()) {
                     // Let the explicit waiter own this child status.
                     break;
                 }

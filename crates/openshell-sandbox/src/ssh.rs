@@ -5,8 +5,6 @@
 
 use crate::process::drop_privileges;
 use crate::sandbox;
-#[cfg(target_os = "linux")]
-use crate::{register_managed_child, unregister_managed_child};
 use miette::{IntoDiagnostic, Result};
 use nix::pty::{Winsize, openpty};
 use nix::unistd::setsid;
@@ -16,6 +14,8 @@ use openshell_ocsf::{
     ActionId, ActivityId, DispositionId, SeverityId, SshActivityBuilder, StatusId, ocsf_emit,
 };
 use openshell_supervisor_process::child_env;
+#[cfg(target_os = "linux")]
+use openshell_supervisor_process::managed_children;
 use rand_core::OsRng;
 use russh::keys::{Algorithm, PrivateKey};
 use russh::server::{Auth, Handle, Session};
@@ -797,7 +797,7 @@ fn spawn_pty_shell(
     #[cfg(target_os = "linux")]
     let child_pid = child.id();
     #[cfg(target_os = "linux")]
-    register_managed_child(child_pid);
+    managed_children::register(child_pid);
     let master_file = master;
 
     let (sender, receiver) = mpsc::channel::<Vec<u8>>();
@@ -843,7 +843,7 @@ fn spawn_pty_shell(
     std::thread::spawn(move || {
         let status = child.wait().ok();
         #[cfg(target_os = "linux")]
-        unregister_managed_child(child_pid);
+        managed_children::unregister(child_pid);
         let code = status.and_then(|s| s.code()).unwrap_or(1).unsigned_abs();
         // Wait for the reader thread to finish forwarding all output before
         // sending exit-status and closing the channel.  This prevents the
@@ -943,7 +943,7 @@ fn spawn_pipe_exec(
     #[cfg(target_os = "linux")]
     let child_pid = child.id();
     #[cfg(target_os = "linux")]
-    register_managed_child(child_pid);
+    managed_children::register(child_pid);
 
     let child_stdin = child.stdin.take();
     let child_stdout = child.stdout.take().expect("stdout must be piped");
@@ -1015,7 +1015,7 @@ fn spawn_pipe_exec(
     std::thread::spawn(move || {
         let status = child.wait().ok();
         #[cfg(target_os = "linux")]
-        unregister_managed_child(child_pid);
+        managed_children::unregister(child_pid);
         let code = status.and_then(|s| s.code()).unwrap_or(1).unsigned_abs();
         // Wait for both reader threads.
         let _ = reader_done_rx.recv_timeout(Duration::from_secs(2));
