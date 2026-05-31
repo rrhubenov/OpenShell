@@ -3461,6 +3461,7 @@ dependencies = [
  "hex",
  "ipnet",
  "miette",
+ "openshell-ocsf",
  "prost",
  "prost-types",
  "protobuf-src",
@@ -3474,6 +3475,7 @@ dependencies = [
  "tonic-build",
  "tracing",
  "url",
+ "uuid",
 ]
 
 [[package]]

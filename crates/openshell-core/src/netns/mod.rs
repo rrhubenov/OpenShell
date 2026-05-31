@@ -7,6 +7,8 @@
 //! the sandbox to the host. This ensures the sandboxed process can only
 //! communicate through the proxy running on the host side of the veth.
 
+mod nft_ruleset;
+
 use miette::{IntoDiagnostic, Result};
 use std::net::IpAddr;
 use std::os::unix::io::RawFd;
@@ -71,7 +73,7 @@ impl NetworkNamespace {
             .unwrap();
 
         openshell_ocsf::ocsf_emit!(
-            openshell_ocsf::ConfigStateChangeBuilder::new(crate::ocsf_ctx())
+            openshell_ocsf::ConfigStateChangeBuilder::new(openshell_ocsf::ctx::ctx())
                 .severity(openshell_ocsf::SeverityId::Informational)
                 .status(openshell_ocsf::StatusId::Success)
                 .state(openshell_ocsf::StateId::Enabled, "creating")
@@ -165,7 +167,7 @@ impl NetworkNamespace {
         };
 
         openshell_ocsf::ocsf_emit!(
-            openshell_ocsf::ConfigStateChangeBuilder::new(crate::ocsf_ctx())
+            openshell_ocsf::ConfigStateChangeBuilder::new(openshell_ocsf::ctx::ctx())
                 .severity(openshell_ocsf::SeverityId::Informational)
                 .status(openshell_ocsf::StatusId::Success)
                 .state(openshell_ocsf::StateId::Enabled, "created")
@@ -262,7 +264,7 @@ impl NetworkNamespace {
     pub fn install_bypass_rules(&self, proxy_port: u16) -> Result<()> {
         let Some(nft_path) = find_nft() else {
             openshell_ocsf::ocsf_emit!(
-                openshell_ocsf::ConfigStateChangeBuilder::new(crate::ocsf_ctx())
+                openshell_ocsf::ConfigStateChangeBuilder::new(openshell_ocsf::ctx::ctx())
                     .severity(openshell_ocsf::SeverityId::Medium)
                     .status(openshell_ocsf::StatusId::Failure)
                     .state(openshell_ocsf::StateId::Disabled, "degraded")
@@ -287,15 +289,12 @@ impl NetworkNamespace {
         // before reject rules in the chain so packets are logged before being
         // rejected. If the kernel lacks nft_log support, fall back to the
         // reject-only ruleset.
-        let ruleset_with_log = super::nft_ruleset::generate_bypass_ruleset(
-            &host_ip_str,
-            proxy_port,
-            Some(&log_prefix),
-        );
+        let ruleset_with_log =
+            nft_ruleset::generate_bypass_ruleset(&host_ip_str, proxy_port, Some(&log_prefix));
 
         if let Err(e) = run_nft_netns(&self.name, &nft_path, &ruleset_with_log) {
             openshell_ocsf::ocsf_emit!(
-                openshell_ocsf::ConfigStateChangeBuilder::new(crate::ocsf_ctx())
+                openshell_ocsf::ConfigStateChangeBuilder::new(openshell_ocsf::ctx::ctx())
                     .severity(openshell_ocsf::SeverityId::Low)
                     .status(openshell_ocsf::StatusId::Failure)
                     .state(openshell_ocsf::StateId::Other, "degraded")
@@ -307,11 +306,11 @@ impl NetworkNamespace {
             );
 
             let ruleset_no_log =
-                super::nft_ruleset::generate_bypass_ruleset(&host_ip_str, proxy_port, None);
+                nft_ruleset::generate_bypass_ruleset(&host_ip_str, proxy_port, None);
 
             if let Err(e) = run_nft_netns(&self.name, &nft_path, &ruleset_no_log) {
                 openshell_ocsf::ocsf_emit!(
-                    openshell_ocsf::ConfigStateChangeBuilder::new(crate::ocsf_ctx())
+                    openshell_ocsf::ConfigStateChangeBuilder::new(openshell_ocsf::ctx::ctx())
                         .severity(openshell_ocsf::SeverityId::Medium)
                         .status(openshell_ocsf::StatusId::Failure)
                         .state(openshell_ocsf::StateId::Disabled, "failed")
@@ -326,7 +325,7 @@ impl NetworkNamespace {
         }
 
         openshell_ocsf::ocsf_emit!(
-            openshell_ocsf::ConfigStateChangeBuilder::new(crate::ocsf_ctx())
+            openshell_ocsf::ConfigStateChangeBuilder::new(openshell_ocsf::ctx::ctx())
                 .severity(openshell_ocsf::SeverityId::Informational)
                 .status(openshell_ocsf::StatusId::Success)
                 .state(openshell_ocsf::StateId::Enabled, "installed")
@@ -369,7 +368,7 @@ impl Drop for NetworkNamespace {
         }
 
         openshell_ocsf::ocsf_emit!(
-            openshell_ocsf::ConfigStateChangeBuilder::new(crate::ocsf_ctx())
+            openshell_ocsf::ConfigStateChangeBuilder::new(openshell_ocsf::ctx::ctx())
                 .severity(openshell_ocsf::SeverityId::Informational)
                 .status(openshell_ocsf::StatusId::Success)
                 .state(openshell_ocsf::StateId::Disabled, "cleaned_up")

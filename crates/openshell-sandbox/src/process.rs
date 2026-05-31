@@ -3,11 +3,11 @@
 
 //! Process management and signal handling.
 
-#[cfg(target_os = "linux")]
-use crate::sandbox::linux::netns::NetworkNamespace;
 use miette::{IntoDiagnostic, Result};
 use nix::sys::signal::{self, Signal};
 use nix::unistd::{Group, Pid, User};
+#[cfg(target_os = "linux")]
+use openshell_core::netns::NetworkNamespace;
 use openshell_core::policy::{NetworkMode, SandboxPolicy};
 use openshell_supervisor_process::child_env;
 #[cfg(target_os = "linux")]
