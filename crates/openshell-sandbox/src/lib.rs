@@ -63,7 +63,11 @@ use openshell_supervisor_process::skills;
 /// # Errors
 ///
 /// Returns an error if the command fails to start or encounters a fatal error.
-#[allow(clippy::too_many_arguments, clippy::similar_names)]
+#[allow(
+    clippy::too_many_arguments,
+    clippy::similar_names,
+    clippy::fn_params_excessive_bools
+)]
 pub async fn run_sandbox(
     command: Vec<String>,
     workdir: Option<String>,
@@ -79,6 +83,8 @@ pub async fn run_sandbox(
     _health_port: u16,
     inference_routes: Option<String>,
     ocsf_enabled: Arc<std::sync::atomic::AtomicBool>,
+    network_enabled: bool,
+    process_enabled: bool,
 ) -> Result<i32> {
     let (program, args) = command
         .split_first()
@@ -198,22 +204,32 @@ pub async fn run_sandbox(
     // it via setns(). The RAII handle lives in this frame for the duration
     // of the sandbox.
     #[cfg(target_os = "linux")]
-    let netns = openshell_supervisor_network::run::create_netns_for_proxy(&policy)?;
+    let netns = if network_enabled {
+        openshell_supervisor_network::run::create_netns_for_proxy(&policy)?
+    } else {
+        None
+    };
 
-    let mut networking = openshell_supervisor_network::run::run_networking(
-        &policy,
-        #[cfg(target_os = "linux")]
-        netns.as_ref(),
-        opa_engine.as_ref(),
-        retained_proto.as_ref(),
-        entrypoint_pid.clone(),
-        &provider_credentials,
-        sandbox_id.as_deref(),
-        sandbox_name_for_agg.as_deref(),
-        openshell_endpoint_for_proxy.as_deref(),
-        inference_routes.as_deref(),
-    )
-    .await?;
+    let mut networking = if network_enabled {
+        Some(
+            openshell_supervisor_network::run::run_networking(
+                &policy,
+                #[cfg(target_os = "linux")]
+                netns.as_ref(),
+                opa_engine.as_ref(),
+                retained_proto.as_ref(),
+                entrypoint_pid.clone(),
+                &provider_credentials,
+                sandbox_id.as_deref(),
+                sandbox_name_for_agg.as_deref(),
+                openshell_endpoint_for_proxy.as_deref(),
+                inference_routes.as_deref(),
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
 
     // Spawn background policy poll task (gRPC mode only).
     if let (Some(id), Some(endpoint), Some(engine)) = (
@@ -227,7 +243,7 @@ pub async fn run_sandbox(
         let poll_ocsf_enabled = ocsf_enabled.clone();
         let poll_pid = entrypoint_pid.clone();
         let poll_provider_credentials = provider_credentials.clone();
-        let poll_policy_local = networking.policy_local_ctx.clone();
+        let poll_policy_local = networking.as_ref().map(|n| n.policy_local_ctx.clone());
         let poll_interval_secs: u64 = std::env::var("OPENSHELL_POLICY_POLL_INTERVAL_SECS")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -240,7 +256,7 @@ pub async fn run_sandbox(
             interval_secs: poll_interval_secs,
             ocsf_enabled: poll_ocsf_enabled,
             provider_credentials: poll_provider_credentials,
-            policy_local_ctx: Some(poll_policy_local),
+            policy_local_ctx: poll_policy_local,
         };
 
         tokio::spawn(async move {
@@ -257,28 +273,82 @@ pub async fn run_sandbox(
         });
     }
 
-    let exit_code = openshell_supervisor_process::run::run_process(
-        program,
-        args,
-        workdir.as_deref(),
-        timeout_secs,
-        interactive,
-        sandbox_id.as_deref(),
-        openshell_endpoint.as_deref(),
-        ssh_socket_path,
-        &policy,
-        entrypoint_pid,
-        provider_credentials,
-        provider_env,
-        networking.ssh_proxy_url.take(),
-        networking.ssh_netns_fd,
-        networking.ca_file_paths.clone(),
-        #[cfg(target_os = "linux")]
-        netns.as_ref(),
-    )
-    .await?;
+    let exit_code = if process_enabled {
+        let (ssh_proxy_url, ssh_netns_fd, ca_file_paths) = match networking.as_mut() {
+            Some(n) => (
+                n.ssh_proxy_url.take(),
+                n.ssh_netns_fd,
+                n.ca_file_paths.clone(),
+            ),
+            None => (None, None, None),
+        };
+
+        openshell_supervisor_process::run::run_process(
+            program,
+            args,
+            workdir.as_deref(),
+            timeout_secs,
+            interactive,
+            sandbox_id.as_deref(),
+            openshell_endpoint.as_deref(),
+            ssh_socket_path,
+            &policy,
+            entrypoint_pid,
+            provider_credentials,
+            provider_env,
+            ssh_proxy_url,
+            ssh_netns_fd,
+            ca_file_paths,
+            #[cfg(target_os = "linux")]
+            netns.as_ref(),
+        )
+        .await?
+    } else {
+        // Network-only sidecar mode: keep the proxy and its background
+        // tasks alive (held via the `networking` value) until SIGINT or
+        // SIGTERM. Exit 0 on clean shutdown.
+        wait_for_shutdown_signal().await;
+        0
+    };
+
+    // Drop networking explicitly so the proxy + bypass monitor RAII
+    // handles tear down before we return.
+    drop(networking);
 
     Ok(exit_code)
+}
+
+/// Wait for SIGINT or SIGTERM. Used in network-only mode where there is
+/// no entrypoint child whose lifetime drives the supervisor's exit.
+async fn wait_for_shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut sigterm = match signal(SignalKind::terminate()) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "Failed to install SIGTERM handler; waiting on SIGINT only"
+                );
+                let _ = tokio::signal::ctrl_c().await;
+                return;
+            }
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                info!("Received SIGINT, shutting down network-only supervisor");
+            }
+            _ = sigterm.recv() => {
+                info!("Received SIGTERM, shutting down network-only supervisor");
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+        info!("Received Ctrl-C, shutting down network-only supervisor");
+    }
 }
 
 // ============================================================================
