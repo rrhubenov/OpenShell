@@ -10,6 +10,7 @@
 pub mod bypass_monitor;
 pub mod denial_aggregator;
 pub mod identity;
+pub mod inference_routes;
 pub mod l7;
 pub mod mechanistic_mapper;
 pub mod opa;
