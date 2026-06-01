@@ -370,6 +370,8 @@ async fn install_initial_agent_skill(sandbox_id: Option<&str>, openshell_endpoin
             ),
         }
     } else {
-        tracing::debug!("agent_policy_proposals_enabled is false at startup; skipping skill install");
+        tracing::debug!(
+            "agent_policy_proposals_enabled is false at startup; skipping skill install"
+        );
     }
 }
