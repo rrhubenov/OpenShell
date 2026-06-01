@@ -16,5 +16,6 @@ pub mod l7;
 pub mod mechanistic_mapper;
 pub mod opa;
 pub mod policy_local;
+pub mod procfs;
 pub mod proxy;
 pub mod run;

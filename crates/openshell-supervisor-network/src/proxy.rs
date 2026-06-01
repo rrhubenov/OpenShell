@@ -1178,7 +1178,7 @@ fn resolve_owner_identity(
     entrypoint_pid: u32,
     identity_cache: &BinaryIdentityCache,
 ) -> std::result::Result<ResolvedIdentity, IdentityError> {
-    let bin_path = openshell_core::procfs::binary_path(owner_pid.cast_signed()).map_err(|e| {
+    let bin_path = crate::procfs::binary_path(owner_pid.cast_signed()).map_err(|e| {
         IdentityError {
             reason: format!("failed to resolve peer binary for PID {owner_pid}: {e}"),
             binary: None,
@@ -1196,7 +1196,7 @@ fn resolve_owner_identity(
             ancestors: vec![],
         })?;
 
-    let ancestors = openshell_core::procfs::collect_ancestor_binaries(owner_pid, entrypoint_pid);
+    let ancestors = crate::procfs::collect_ancestor_binaries(owner_pid, entrypoint_pid);
 
     for ancestor in &ancestors {
         identity_cache
@@ -1215,7 +1215,7 @@ fn resolve_owner_identity(
     let mut exclude = ancestors.clone();
     exclude.push(bin_path.clone());
     let cmdline_paths =
-        openshell_core::procfs::collect_cmdline_paths(owner_pid, entrypoint_pid, &exclude);
+        crate::procfs::collect_cmdline_paths(owner_pid, entrypoint_pid, &exclude);
 
     Ok(ResolvedIdentity {
         bin_path,
@@ -1246,7 +1246,7 @@ fn resolve_process_identity(
     identity_cache: &BinaryIdentityCache,
 ) -> std::result::Result<ResolvedIdentity, IdentityError> {
     let socket_owners =
-        openshell_core::procfs::resolve_tcp_peer_socket_owners(entrypoint_pid, peer_port).map_err(
+        crate::procfs::resolve_tcp_peer_socket_owners(entrypoint_pid, peer_port).map_err(
             |e| IdentityError {
                 reason: format!("failed to resolve peer binary: {e}"),
                 binary: None,

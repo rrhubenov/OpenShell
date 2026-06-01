@@ -9,7 +9,7 @@
 //! mid-sandbox and the request is denied.
 
 use miette::Result;
-use openshell_core::procfs;
+use crate::procfs;
 use std::collections::HashMap;
 use std::fs::Metadata;
 #[cfg(unix)]
@@ -175,7 +175,7 @@ impl BinaryIdentityCache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use openshell_core::procfs;
+    use crate::procfs;
     use std::io::Write;
     use std::time::Duration;
 

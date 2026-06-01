@@ -24,7 +24,6 @@ pub mod net;
 pub mod netns;
 pub mod paths;
 pub mod policy;
-pub mod procfs;
 pub mod progress;
 pub mod proposals;
 pub mod proto;
