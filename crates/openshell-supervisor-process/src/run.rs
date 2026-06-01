@@ -66,6 +66,17 @@ pub async fn run_process(
     // and the SSH listener and entrypoint child have not been exposed yet.
     crate::sandbox::apply_supervisor_startup_hardening()?;
 
+    // Verify the runtime PID limit can accommodate the policy's pid_max.
+    #[cfg(target_os = "linux")]
+    {
+        let pid_limit_mode = if std::env::var_os("OPENSHELL_REQUIRE_RUNTIME_PID_LIMIT").is_some() {
+            crate::process::RuntimePidLimitMode::Require
+        } else {
+            crate::process::RuntimePidLimitMode::Warn
+        };
+        crate::process::check_runtime_pid_limit(pid_limit_mode)?;
+    }
+
     // Zombie reaper — openshell-sandbox may run as PID 1 in containers and
     // must reap orphaned grandchildren (e.g. background daemons started by
     // coding agents) to prevent zombie accumulation.

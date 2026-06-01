@@ -191,16 +191,6 @@ pub async fn run_sandbox(
     // Prepare filesystem: create and chown read_write directories
     prepare_filesystem(&policy)?;
 
-    #[cfg(target_os = "linux")]
-    {
-        let pid_limit_mode = if std::env::var_os("OPENSHELL_REQUIRE_RUNTIME_PID_LIMIT").is_some() {
-            openshell_supervisor_process::process::RuntimePidLimitMode::Require
-        } else {
-            openshell_supervisor_process::process::RuntimePidLimitMode::Warn
-        };
-        openshell_supervisor_process::process::check_runtime_pid_limit(pid_limit_mode)?;
-    }
-
     // Initialize the agent-proposals feature flag. Default false until the
     // initial settings fetch (or the poll loop) tells us otherwise. The flag
     // gates the skill install, the policy.local route handler, and the L7
