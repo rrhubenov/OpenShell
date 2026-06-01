@@ -8,7 +8,7 @@
 use miette::Result;
 use std::future::Future;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::AtomicU32;
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
@@ -50,7 +50,7 @@ pub(crate) use openshell_ocsf::ctx::ctx as ocsf_ctx;
 /// to gate the agent-controlled mutation surface. Exposed `pub(crate)` so
 /// unit tests in sibling modules can flip the flag through a serialized
 /// guard (see `policy_local::tests::ProposalsFlagGuard`).
-pub(crate) use openshell_core::proposals::{AGENT_PROPOSALS_ENABLED, agent_proposals_enabled};
+pub(crate) use openshell_core::proposals::AGENT_PROPOSALS_ENABLED;
 
 use openshell_core::policy::{NetworkMode, NetworkPolicy, ProxyPolicy, SandboxPolicy};
 use openshell_core::provider_credentials::ProviderCredentialState;
@@ -193,38 +193,6 @@ pub async fn run_sandbox(
         .is_err()
     {
         debug!("agent proposals flag already initialized, keeping existing");
-    }
-
-    // Eagerly fetch the initial settings so skill install can honor the flag
-    // at startup rather than waiting for the poll loop's first tick. In
-    // offline/file-mode there is no gateway, so the flag stays false.
-    if let (Some(id), Some(endpoint)) = (&sandbox_id, &openshell_endpoint)
-        && let Ok(client) =
-            openshell_core::grpc_client::CachedOpenShellClient::connect(endpoint).await
-        && let Ok(result) = client.poll_settings(id).await
-    {
-        let initial = extract_bool_setting(
-            &result.settings,
-            openshell_core::settings::AGENT_POLICY_PROPOSALS_ENABLED_KEY,
-        )
-        .unwrap_or(false);
-        proposals_enabled.store(initial, Ordering::Relaxed);
-    }
-
-    if agent_proposals_enabled() {
-        match skills::install_static_skills() {
-            Ok(installed) => {
-                info!(
-                    path = %installed.policy_advisor.display(),
-                    "Installed sandbox agent skill"
-                );
-            }
-            Err(error) => {
-                warn!(error = %error, "Failed to install sandbox agent skill");
-            }
-        }
-    } else {
-        debug!("agent_policy_proposals_enabled is false at startup; skipping skill install");
     }
 
     // Shared PID: set after process spawn so the proxy can look up

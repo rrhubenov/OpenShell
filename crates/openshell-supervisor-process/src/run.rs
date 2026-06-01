@@ -72,6 +72,12 @@ pub async fn run_process(
     #[cfg(unix)]
     crate::process::prepare_filesystem(policy)?;
 
+    // Eagerly fetch initial settings and install the agent skill if the
+    // proposals flag is on at startup, rather than waiting for the policy
+    // poll loop's first tick. In offline/file-mode there is no gateway, so
+    // the flag stays at its default (false) and no skill is installed.
+    install_initial_agent_skill(sandbox_id, openshell_endpoint).await;
+
     // Install the supervisor seccomp prelude before spawning any workload-side
     // tasks. By this point the orchestrator has finished privileged startup
     // helpers (network namespace setup, nftables probes via run_networking),
@@ -311,4 +317,59 @@ pub async fn run_process(
     );
 
     Ok(status.code())
+}
+
+/// Eagerly fetch initial settings and install the agent-driven policy
+/// proposal skill if the flag is on at startup.
+///
+/// Without this, the skill would only get installed on the policy poll
+/// loop's first false→true transition, which can be ~10 s after launch —
+/// long enough for an agent to start running without seeing it.
+///
+/// Best-effort: any failure (no gateway, RPC error, install failure) is
+/// logged but does not fail sandbox startup.
+async fn install_initial_agent_skill(sandbox_id: Option<&str>, openshell_endpoint: Option<&str>) {
+    use openshell_core::proto::setting_value;
+    use std::sync::atomic::Ordering;
+
+    let Some(flag) = openshell_core::proposals::AGENT_PROPOSALS_ENABLED.get() else {
+        // The orchestrator is responsible for setting the OnceLock before
+        // calling run_process. If it isn't set, behave as if the flag is
+        // off and skip the install.
+        tracing::debug!("AGENT_PROPOSALS_ENABLED not initialized; skipping skill install");
+        return;
+    };
+
+    if let (Some(id), Some(endpoint)) = (sandbox_id, openshell_endpoint)
+        && let Ok(client) =
+            openshell_core::grpc_client::CachedOpenShellClient::connect(endpoint).await
+        && let Ok(result) = client.poll_settings(id).await
+    {
+        let initial = result
+            .settings
+            .get(openshell_core::settings::AGENT_POLICY_PROPOSALS_ENABLED_KEY)
+            .and_then(|es| es.value.as_ref())
+            .and_then(|sv| sv.value.as_ref())
+            .and_then(|v| match v {
+                setting_value::Value::BoolValue(b) => Some(*b),
+                _ => None,
+            })
+            .unwrap_or(false);
+        flag.store(initial, Ordering::Relaxed);
+    }
+
+    if openshell_core::proposals::agent_proposals_enabled() {
+        match crate::skills::install_static_skills() {
+            Ok(installed) => info!(
+                path = %installed.policy_advisor.display(),
+                "Installed sandbox agent skill"
+            ),
+            Err(error) => tracing::warn!(
+                error = %error,
+                "Failed to install sandbox agent skill"
+            ),
+        }
+    } else {
+        tracing::debug!("agent_policy_proposals_enabled is false at startup; skipping skill install");
+    }
 }
