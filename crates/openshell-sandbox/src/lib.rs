@@ -5,7 +5,7 @@
 //!
 //! This crate provides process sandboxing and monitoring capabilities.
 
-use miette::{IntoDiagnostic, Result};
+use miette::Result;
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -182,9 +182,6 @@ pub async fn run_sandbox(
         provider_credential_expires_at_ms,
     );
     let provider_env = provider_credentials.snapshot().child_env.clone();
-
-    // Prepare filesystem: create and chown read_write directories
-    prepare_filesystem(&policy)?;
 
     // Initialize the agent-proposals feature flag. Default false until the
     // initial settings fetch (or the poll loop) tells us otherwise. The flag
@@ -1138,106 +1135,6 @@ fn discover_policy_from_path(path: &std::path::Path) -> openshell_core::proto::S
     }
 }
 
-/// Prepare a `read_write` path for the sandboxed process.
-///
-/// Returns `true` when the path was created by the supervisor and therefore
-/// still needs to be chowned to the sandbox user/group. Existing paths keep
-/// their image-defined ownership.
-#[cfg(unix)]
-fn prepare_read_write_path(path: &std::path::Path) -> Result<bool> {
-    // SECURITY: use symlink_metadata (lstat) to inspect each path *before*
-    // calling chown. chown follows symlinks, so a malicious container image
-    // could place a symlink (e.g. /sandbox -> /etc/shadow) to trick the
-    // root supervisor into transferring ownership of arbitrary files.
-    // The TOCTOU window between lstat and chown is not exploitable because
-    // no untrusted process is running yet (the child has not been forked).
-    if let Ok(meta) = std::fs::symlink_metadata(path) {
-        if meta.file_type().is_symlink() {
-            return Err(miette::miette!(
-                "read_write path '{}' is a symlink — refusing to chown (potential privilege escalation)",
-                path.display()
-            ));
-        }
-
-        debug!(
-            path = %path.display(),
-            "Preserving ownership for existing read_write path"
-        );
-        Ok(false)
-    } else {
-        debug!(path = %path.display(), "Creating read_write directory");
-        std::fs::create_dir_all(path).into_diagnostic()?;
-        Ok(true)
-    }
-}
-
-/// Prepare filesystem for the sandboxed process.
-///
-/// Creates `read_write` directories if they don't exist and sets ownership
-/// on newly-created paths to the configured sandbox user/group. This runs as
-/// the supervisor (root) before forking the child process.
-#[cfg(unix)]
-fn prepare_filesystem(policy: &SandboxPolicy) -> Result<()> {
-    use nix::unistd::{Group, User, chown};
-
-    let user_name = match policy.process.run_as_user.as_deref() {
-        Some(name) if !name.is_empty() => Some(name),
-        _ => None,
-    };
-    let group_name = match policy.process.run_as_group.as_deref() {
-        Some(name) if !name.is_empty() => Some(name),
-        _ => None,
-    };
-
-    // If no user/group configured, nothing to do
-    if user_name.is_none() && group_name.is_none() {
-        return Ok(());
-    }
-
-    // Resolve user and group
-    let uid = if let Some(name) = user_name {
-        Some(
-            User::from_name(name)
-                .into_diagnostic()?
-                .ok_or_else(|| miette::miette!("Sandbox user not found: {name}"))?
-                .uid,
-        )
-    } else {
-        None
-    };
-
-    let gid = if let Some(name) = group_name {
-        Some(
-            Group::from_name(name)
-                .into_diagnostic()?
-                .ok_or_else(|| miette::miette!("Sandbox group not found: {name}"))?
-                .gid,
-        )
-    } else {
-        None
-    };
-
-    // Create missing read_write paths and only chown the ones we created.
-    for path in &policy.filesystem.read_write {
-        if prepare_read_write_path(path)? {
-            debug!(
-                path = %path.display(),
-                ?uid,
-                ?gid,
-                "Setting ownership on newly created read_write path"
-            );
-            chown(path, uid, gid).into_diagnostic()?;
-        }
-    }
-
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn prepare_filesystem(_policy: &SandboxPolicy) -> Result<()> {
-    Ok(())
-}
-
 /// Background loop that polls the server for policy updates.
 ///
 /// When a new version is detected, attempts to reload the OPA engine via
@@ -1589,11 +1486,6 @@ fn format_setting_value(es: &openshell_core::proto::EffectiveSetting) -> String 
 )]
 mod tests {
     use super::*;
-    #[cfg(unix)]
-    use nix::unistd::{Group, User};
-    use openshell_core::policy::{FilesystemPolicy, LandlockPolicy, ProcessPolicy};
-    #[cfg(unix)]
-    use std::os::unix::fs::{MetadataExt, symlink};
     // ---- Policy disk discovery tests ----
 
     #[test]
@@ -1686,101 +1578,5 @@ filesystem_policy:
         let proto = openshell_policy::restrictive_default_policy();
         let local_policy = SandboxPolicy::try_from(proto).expect("conversion should succeed");
         assert!(matches!(local_policy.network.mode, NetworkMode::Proxy));
-    }
-
-    #[cfg(unix)]
-    fn sandbox_policy_with_read_write(
-        path: std::path::PathBuf,
-        run_as_user: Option<String>,
-        run_as_group: Option<String>,
-    ) -> SandboxPolicy {
-        SandboxPolicy {
-            version: 1,
-            filesystem: FilesystemPolicy {
-                read_only: vec![],
-                read_write: vec![path],
-                include_workdir: false,
-            },
-            network: NetworkPolicy::default(),
-            landlock: LandlockPolicy::default(),
-            process: ProcessPolicy {
-                run_as_user,
-                run_as_group,
-            },
-        }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn prepare_read_write_path_creates_missing_directory() {
-        let dir = tempfile::tempdir().unwrap();
-        let missing = dir.path().join("missing").join("nested");
-
-        assert!(prepare_read_write_path(&missing).unwrap());
-        assert!(missing.is_dir());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn prepare_read_write_path_preserves_existing_directory() {
-        let dir = tempfile::tempdir().unwrap();
-        let existing = dir.path().join("existing");
-        std::fs::create_dir(&existing).unwrap();
-
-        assert!(!prepare_read_write_path(&existing).unwrap());
-        assert!(existing.is_dir());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn prepare_read_write_path_rejects_symlink() {
-        let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("target");
-        let link = dir.path().join("link");
-        std::fs::create_dir(&target).unwrap();
-        symlink(&target, &link).unwrap();
-
-        let error = prepare_read_write_path(&link).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("is a symlink — refusing to chown"),
-            "unexpected error: {error}"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn prepare_filesystem_skips_chown_for_existing_read_write_paths() {
-        if nix::unistd::geteuid().is_root() {
-            return;
-        }
-
-        let current_user = User::from_uid(nix::unistd::geteuid())
-            .unwrap()
-            .expect("current user entry");
-        let restricted_group = Group::from_gid(nix::unistd::Gid::from_raw(0))
-            .unwrap()
-            .expect("gid 0 group entry");
-        if restricted_group.gid == nix::unistd::getegid() {
-            return;
-        }
-
-        let dir = tempfile::tempdir().unwrap();
-        let existing = dir.path().join("existing");
-        std::fs::create_dir(&existing).unwrap();
-        let before = std::fs::metadata(&existing).unwrap();
-
-        let policy = sandbox_policy_with_read_write(
-            existing.clone(),
-            Some(current_user.name),
-            Some(restricted_group.name),
-        );
-
-        prepare_filesystem(&policy).expect("existing path should not be re-owned");
-
-        let after = std::fs::metadata(&existing).unwrap();
-        assert_eq!(after.uid(), before.uid());
-        assert_eq!(after.gid(), before.gid());
     }
 }

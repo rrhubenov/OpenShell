@@ -66,6 +66,12 @@ pub async fn run_process(
     #[cfg(unix)]
     crate::process::validate_sandbox_user(policy)?;
 
+    // Create read_write directories and chown newly-created ones to the
+    // sandbox user/group. Runs as the supervisor (root) before the child
+    // is forked so the workload sees writable paths it owns.
+    #[cfg(unix)]
+    crate::process::prepare_filesystem(policy)?;
+
     // Install the supervisor seccomp prelude before spawning any workload-side
     // tasks. By this point the orchestrator has finished privileged startup
     // helpers (network namespace setup, nftables probes via run_networking),
