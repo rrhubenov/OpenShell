@@ -40,7 +40,7 @@ nix = { workspace = true }
 dev-settings = []
 ## Expose proposals::test_helpers (`ProposalsFlagGuard`) to downstream test
 ## code in other crates. Enabled by openshell-sandbox and
-## openshell-supervisor-networking dev builds.
+## openshell-supervisor-network dev builds.
 test-helpers = []
 
 [build-dependencies]

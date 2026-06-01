@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [package]
-name = "openshell-supervisor-networking"
-description = "Networking component of the OpenShell supervisor: proxy, L7 enforcement, OPA, inference routing, denial aggregator"
+name = "openshell-supervisor-network"
+description = "Network component of the OpenShell supervisor: proxy, L7 enforcement, OPA, inference routing, denial aggregator"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

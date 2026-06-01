@@ -54,8 +54,8 @@ pub(crate) use openshell_core::proposals::{AGENT_PROPOSALS_ENABLED, agent_propos
 
 use openshell_core::policy::{NetworkMode, NetworkPolicy, ProxyPolicy, SandboxPolicy};
 use openshell_core::provider_credentials::ProviderCredentialState;
-use openshell_supervisor_networking::mechanistic_mapper;
-use openshell_supervisor_networking::opa::OpaEngine;
+use openshell_supervisor_network::mechanistic_mapper;
+use openshell_supervisor_network::opa::OpaEngine;
 pub use openshell_supervisor_process::process::{ProcessHandle, ProcessStatus};
 pub use openshell_supervisor_process::sandbox::apply_supervisor_startup_hardening;
 use openshell_supervisor_process::skills;
@@ -121,7 +121,7 @@ pub async fn run_sandbox(
     )
     .await?;
     let policy_local_ctx = Arc::new(
-        openshell_supervisor_networking::policy_local::PolicyLocalContext::new(
+        openshell_supervisor_network::policy_local::PolicyLocalContext::new(
             retained_proto.clone(),
             openshell_endpoint.clone(),
             sandbox_name_for_agg.clone().or_else(|| sandbox_id.clone()),
@@ -257,9 +257,9 @@ pub async fn run_sandbox(
     // it via setns(). The RAII handle lives in this frame for the duration
     // of the sandbox.
     #[cfg(target_os = "linux")]
-    let netns = openshell_supervisor_networking::run::create_netns_for_proxy(&policy)?;
+    let netns = openshell_supervisor_network::run::create_netns_for_proxy(&policy)?;
 
-    let mut networking = openshell_supervisor_networking::run::run_networking(
+    let mut networking = openshell_supervisor_network::run::run_networking(
         &policy,
         #[cfg(target_os = "linux")]
         netns.as_ref(),
@@ -390,11 +390,10 @@ pub async fn run_sandbox(
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(10);
 
-            let aggregator =
-                openshell_supervisor_networking::denial_aggregator::DenialAggregator::new(
-                    rx,
-                    flush_interval_secs,
-                );
+            let aggregator = openshell_supervisor_network::denial_aggregator::DenialAggregator::new(
+                rx,
+                flush_interval_secs,
+            );
 
             tokio::spawn(async move {
                 aggregator
@@ -1399,7 +1398,7 @@ fn prepare_filesystem(_policy: &SandboxPolicy) -> Result<()> {
 async fn flush_proposals_to_gateway(
     endpoint: &str,
     sandbox_name: &str,
-    summaries: Vec<openshell_supervisor_networking::denial_aggregator::FlushableDenialSummary>,
+    summaries: Vec<openshell_supervisor_network::denial_aggregator::FlushableDenialSummary>,
 ) -> Result<()> {
     use openshell_core::grpc_client::CachedOpenShellClient;
     use openshell_core::proto::{DenialSummary, L7RequestSample};
@@ -1471,8 +1470,7 @@ struct PolicyPollLoopContext {
     interval_secs: u64,
     ocsf_enabled: Arc<std::sync::atomic::AtomicBool>,
     provider_credentials: ProviderCredentialState,
-    policy_local_ctx:
-        Option<Arc<openshell_supervisor_networking::policy_local::PolicyLocalContext>>,
+    policy_local_ctx: Option<Arc<openshell_supervisor_network::policy_local::PolicyLocalContext>>,
 }
 
 async fn run_policy_poll_loop(ctx: PolicyPollLoopContext) -> Result<()> {
