@@ -34,6 +34,10 @@ uuid = { workspace = true }
 libc = "0.2"
 rustix = { workspace = true }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock = "0.4"
+seccompiler = "0.5"
+
 [dev-dependencies]
 tempfile = "3"
 

@@ -52,8 +52,6 @@ pub(crate) use openshell_ocsf::ctx::ctx as ocsf_ctx;
 /// guard (see `policy_local::tests::ProposalsFlagGuard`).
 pub(crate) use openshell_core::proposals::{AGENT_PROPOSALS_ENABLED, agent_proposals_enabled};
 
-#[cfg(target_os = "linux")]
-use openshell_core::netns::NetworkNamespace;
 use openshell_core::policy::{NetworkMode, NetworkPolicy, ProxyPolicy, SandboxPolicy};
 use openshell_core::provider_credentials::ProviderCredentialState;
 use openshell_supervisor_networking::mechanistic_mapper;
@@ -61,9 +59,6 @@ use openshell_supervisor_networking::opa::OpaEngine;
 pub use openshell_supervisor_process::process::{ProcessHandle, ProcessStatus};
 pub use openshell_supervisor_process::sandbox::apply_supervisor_startup_hardening;
 use openshell_supervisor_process::skills;
-
-#[cfg(target_os = "linux")]
-use openshell_supervisor_process::managed_children;
 
 /// Run a command in the sandbox.
 ///
@@ -201,11 +196,11 @@ pub async fn run_sandbox(
     #[cfg(target_os = "linux")]
     {
         let pid_limit_mode = if std::env::var_os("OPENSHELL_REQUIRE_RUNTIME_PID_LIMIT").is_some() {
-            process::RuntimePidLimitMode::Require
+            openshell_supervisor_process::process::RuntimePidLimitMode::Require
         } else {
-            process::RuntimePidLimitMode::Warn
+            openshell_supervisor_process::process::RuntimePidLimitMode::Warn
         };
-        process::check_runtime_pid_limit(pid_limit_mode)?;
+        openshell_supervisor_process::process::check_runtime_pid_limit(pid_limit_mode)?;
     }
 
     // Initialize the agent-proposals feature flag. Default false until the

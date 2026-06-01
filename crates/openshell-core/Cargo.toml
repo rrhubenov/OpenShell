@@ -29,6 +29,9 @@ base64 = { workspace = true }
 [target.'cfg(target_os = "linux")'.dependencies]
 openshell-ocsf = { path = "../openshell-ocsf" }
 uuid = { workspace = true }
+libc = "0.2"
+tempfile = "3"
+nix = { workspace = true }
 
 [features]
 ## Include test-only settings (dummy_bool, dummy_int) in the registry.
