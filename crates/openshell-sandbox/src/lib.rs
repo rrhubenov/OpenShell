@@ -56,7 +56,6 @@ use openshell_core::policy::{NetworkMode, NetworkPolicy, ProxyPolicy, SandboxPol
 use openshell_core::provider_credentials::ProviderCredentialState;
 use openshell_supervisor_network::opa::OpaEngine;
 pub use openshell_supervisor_process::process::{ProcessHandle, ProcessStatus};
-pub use openshell_supervisor_process::sandbox::apply_supervisor_startup_hardening;
 use openshell_supervisor_process::skills;
 
 /// Run a command in the sandbox.
@@ -273,11 +272,6 @@ pub async fn run_sandbox(
         inference_routes.as_deref(),
     )
     .await?;
-
-    // Install the supervisor seccomp prelude after privileged startup helpers
-    // (network namespace setup, nftables probes) complete, but before the SSH
-    // listener and workload process are exposed.
-    apply_supervisor_startup_hardening()?;
 
     // Spawn background policy poll task (gRPC mode only).
     if let (Some(id), Some(endpoint), Some(engine)) = (

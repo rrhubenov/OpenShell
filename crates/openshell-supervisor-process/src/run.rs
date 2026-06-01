@@ -60,6 +60,12 @@ pub async fn run_process(
     ca_file_paths: Option<(std::path::PathBuf, std::path::PathBuf)>,
     #[cfg(target_os = "linux")] netns: Option<&NetworkNamespace>,
 ) -> Result<i32> {
+    // Install the supervisor seccomp prelude before spawning any workload-side
+    // tasks. By this point the orchestrator has finished privileged startup
+    // helpers (network namespace setup, nftables probes via run_networking),
+    // and the SSH listener and entrypoint child have not been exposed yet.
+    crate::sandbox::apply_supervisor_startup_hardening()?;
+
     // Zombie reaper — openshell-sandbox may run as PID 1 in containers and
     // must reap orphaned grandchildren (e.g. background daemons started by
     // coding agents) to prevent zombie accumulation.
