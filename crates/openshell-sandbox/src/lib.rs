@@ -118,13 +118,6 @@ pub async fn run_sandbox(
         policy_data,
     )
     .await?;
-    let policy_local_ctx = Arc::new(
-        openshell_supervisor_network::policy_local::PolicyLocalContext::new(
-            retained_proto.clone(),
-            openshell_endpoint.clone(),
-            sandbox_name_for_agg.clone().or_else(|| sandbox_id.clone()),
-        ),
-    );
 
     // Fetch provider environment variables from the server.
     // This is done after loading the policy so the sandbox can still start
@@ -215,7 +208,6 @@ pub async fn run_sandbox(
         retained_proto.as_ref(),
         entrypoint_pid.clone(),
         &provider_credentials,
-        &policy_local_ctx,
         sandbox_id.as_deref(),
         sandbox_name_for_agg.as_deref(),
         openshell_endpoint_for_proxy.as_deref(),
@@ -235,7 +227,7 @@ pub async fn run_sandbox(
         let poll_ocsf_enabled = ocsf_enabled.clone();
         let poll_pid = entrypoint_pid.clone();
         let poll_provider_credentials = provider_credentials.clone();
-        let poll_policy_local = policy_local_ctx.clone();
+        let poll_policy_local = networking.policy_local_ctx.clone();
         let poll_interval_secs: u64 = std::env::var("OPENSHELL_POLICY_POLL_INTERVAL_SECS")
             .ok()
             .and_then(|v| v.parse().ok())

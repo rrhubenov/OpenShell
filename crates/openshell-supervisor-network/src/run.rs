@@ -103,6 +103,10 @@ pub struct Networking {
     pub ca_file_paths: Option<(std::path::PathBuf, std::path::PathBuf)>,
     pub ssh_proxy_url: Option<String>,
     pub ssh_netns_fd: Option<i32>,
+    /// Policy-local route context: shared with the orchestrator's policy poll
+    /// loop so it can publish updated `SandboxPolicy` snapshots that the
+    /// `policy.local` route handler returns to the workload.
+    pub policy_local_ctx: Arc<PolicyLocalContext>,
 }
 
 /// Set up the networking stack: ephemeral CA + TLS state, proxy server,
@@ -125,12 +129,22 @@ pub async fn run_networking(
     retained_proto: Option<&ProtoSandboxPolicy>,
     entrypoint_pid: Arc<AtomicU32>,
     provider_credentials: &ProviderCredentialState,
-    policy_local_ctx: &Arc<PolicyLocalContext>,
     sandbox_id: Option<&str>,
     sandbox_name: Option<&str>,
     openshell_endpoint: Option<&str>,
     inference_routes: Option<&str>,
 ) -> Result<Networking> {
+    // Build the policy-local route context. The orchestrator's policy poll
+    // loop also holds an `Arc` clone (via `Networking::policy_local_ctx`) so
+    // it can publish updated policy snapshots after a successful reload.
+    let policy_local_ctx = Arc::new(PolicyLocalContext::new(
+        retained_proto.cloned(),
+        openshell_endpoint.map(str::to_string),
+        sandbox_name
+            .map(str::to_string)
+            .or_else(|| sandbox_id.map(str::to_string)),
+    ));
+
     // Spawn a task to resolve policy binary symlinks once the workload's mount
     // namespace becomes accessible via /proc/<pid>/root/. Reads entrypoint_pid
     // lazily, so spawning before run_process sets the PID is safe — the probe
@@ -410,6 +424,7 @@ pub async fn run_networking(
         ca_file_paths,
         ssh_proxy_url,
         ssh_netns_fd,
+        policy_local_ctx,
     })
 }
 
