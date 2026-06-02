@@ -3,12 +3,12 @@
 
 //! HTTP CONNECT proxy with OPA policy evaluation and process-identity binding.
 
+use crate::denial::DenialEvent;
 use crate::identity::BinaryIdentityCache;
 use crate::l7::tls::ProxyTlsState;
 use crate::opa::{NetworkAction, OpaEngine, PolicyGenerationGuard};
 use crate::policy_local::{POLICY_LOCAL_HOST, PolicyLocalContext};
 use miette::{IntoDiagnostic, Result};
-use crate::denial::DenialEvent;
 use openshell_core::net::{is_always_blocked_ip, is_internal_ip, is_link_local_ip};
 use openshell_core::policy::ProxyPolicy;
 use openshell_core::provider_credentials::ProviderCredentialState;
@@ -1178,14 +1178,13 @@ fn resolve_owner_identity(
     entrypoint_pid: u32,
     identity_cache: &BinaryIdentityCache,
 ) -> std::result::Result<ResolvedIdentity, IdentityError> {
-    let bin_path = crate::procfs::binary_path(owner_pid.cast_signed()).map_err(|e| {
-        IdentityError {
+    let bin_path =
+        crate::procfs::binary_path(owner_pid.cast_signed()).map_err(|e| IdentityError {
             reason: format!("failed to resolve peer binary for PID {owner_pid}: {e}"),
             binary: None,
             binary_pid: Some(owner_pid),
             ancestors: vec![],
-        }
-    })?;
+        })?;
 
     let bin_hash = identity_cache
         .verify_or_cache(&bin_path)
@@ -1214,8 +1213,7 @@ fn resolve_owner_identity(
 
     let mut exclude = ancestors.clone();
     exclude.push(bin_path.clone());
-    let cmdline_paths =
-        crate::procfs::collect_cmdline_paths(owner_pid, entrypoint_pid, &exclude);
+    let cmdline_paths = crate::procfs::collect_cmdline_paths(owner_pid, entrypoint_pid, &exclude);
 
     Ok(ResolvedIdentity {
         bin_path,
@@ -1245,15 +1243,13 @@ fn resolve_process_identity(
     peer_port: u16,
     identity_cache: &BinaryIdentityCache,
 ) -> std::result::Result<ResolvedIdentity, IdentityError> {
-    let socket_owners =
-        crate::procfs::resolve_tcp_peer_socket_owners(entrypoint_pid, peer_port).map_err(
-            |e| IdentityError {
-                reason: format!("failed to resolve peer binary: {e}"),
-                binary: None,
-                binary_pid: None,
-                ancestors: vec![],
-            },
-        )?;
+    let socket_owners = crate::procfs::resolve_tcp_peer_socket_owners(entrypoint_pid, peer_port)
+        .map_err(|e| IdentityError {
+            reason: format!("failed to resolve peer binary: {e}"),
+            binary: None,
+            binary_pid: None,
+            ancestors: vec![],
+        })?;
 
     let mut identities = Vec::with_capacity(socket_owners.owners.len());
     for owner in &socket_owners.owners {
