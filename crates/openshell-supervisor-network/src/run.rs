@@ -26,16 +26,16 @@ use openshell_ocsf::{
     ConfigStateChangeBuilder, SeverityId, StateId, StatusId, ctx::ctx as ocsf_ctx, ocsf_emit,
 };
 
-use crate::denial_aggregator::{DenialAggregator, FlushableDenialSummary};
+use crate::denial::DenialEvent;
 use crate::identity::BinaryIdentityCache;
 use crate::l7::tls::{
     CertCache, ProxyTlsState, SandboxCa, build_upstream_client_config, read_system_ca_bundle,
     write_ca_files,
 };
-use crate::mechanistic_mapper;
 use crate::opa::OpaEngine;
 use crate::policy_local::PolicyLocalContext;
 use crate::proxy::ProxyHandle;
+use tokio::sync::mpsc::UnboundedSender;
 
 /// Create the workload's network namespace and install bypass detection
 /// rules. Returns `None` when the policy is not in proxy mode. Linux-only.
@@ -133,6 +133,7 @@ pub async fn run_networking(
     sandbox_name: Option<&str>,
     openshell_endpoint: Option<&str>,
     inference_routes: Option<&str>,
+    denial_tx: Option<UnboundedSender<DenialEvent>>,
 ) -> Result<Networking> {
     // Build the policy-local route context. The orchestrator's policy poll
     // loop also holds an `Arc` clone (via `Networking::policy_local_ctx`) so
@@ -263,121 +264,67 @@ pub async fn run_networking(
         (None, None)
     };
 
-    let (proxy_handle, denial_rx, bypass_denial_tx) =
-        if matches!(policy.network.mode, NetworkMode::Proxy) {
-            let proxy_policy = policy.network.proxy.as_ref().ok_or_else(|| {
-                miette::miette!(
-                    "Network mode is set to proxy but no proxy configuration was provided"
-                )
-            })?;
+    let proxy_handle = if matches!(policy.network.mode, NetworkMode::Proxy) {
+        let proxy_policy = policy.network.proxy.as_ref().ok_or_else(|| {
+            miette::miette!("Network mode is set to proxy but no proxy configuration was provided")
+        })?;
 
-            let engine = opa_engine.cloned().ok_or_else(|| {
-                miette::miette!("Proxy mode requires an OPA engine (--rego-policy and --rego-data)")
-            })?;
+        let engine = opa_engine.cloned().ok_or_else(|| {
+            miette::miette!("Proxy mode requires an OPA engine (--rego-policy and --rego-data)")
+        })?;
 
-            let cache = identity_cache.clone().ok_or_else(|| {
-                miette::miette!(
-                    "Proxy mode requires an identity cache (OPA engine must be configured)"
-                )
-            })?;
+        let cache = identity_cache.clone().ok_or_else(|| {
+            miette::miette!("Proxy mode requires an identity cache (OPA engine must be configured)")
+        })?;
 
-            // If we have a network namespace, bind to the veth host IP so sandboxed
-            // processes can reach the proxy via TCP.
-            #[cfg(target_os = "linux")]
-            let bind_addr = netns.map(|ns| {
-                let port = proxy_policy.http_addr.map_or(3128, |addr| addr.port());
-                SocketAddr::new(ns.host_ip(), port)
-            });
-
-            #[cfg(not(target_os = "linux"))]
-            let bind_addr: Option<SocketAddr> = None;
-
-            // Build inference context for local routing of intercepted inference calls.
-            let inference_ctx = crate::inference_routes::build_inference_context(
-                sandbox_id,
-                openshell_endpoint,
-                inference_routes,
-            )
-            .await?;
-
-            // Create denial aggregator channel if in gRPC mode (sandbox_id present).
-            // Clone the sender for the bypass monitor before passing to the proxy.
-            let (denial_tx, denial_rx, bypass_denial_tx) = if sandbox_id.is_some() {
-                let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-                let bypass_tx = tx.clone();
-                (Some(tx), Some(rx), Some(bypass_tx))
-            } else {
-                (None, None, None)
-            };
-
-            let proxy_handle = ProxyHandle::start_with_bind_addr(
-                proxy_policy,
-                bind_addr,
-                engine,
-                cache,
-                entrypoint_pid.clone(),
-                tls_state,
-                inference_ctx,
-                Some(provider_credentials.clone()),
-                Some(policy_local_ctx.clone()),
-                denial_tx,
-            )
-            .await?;
-            (Some(proxy_handle), denial_rx, bypass_denial_tx)
-        } else {
-            (None, None, None)
-        };
-
-    // Spawn the denial-aggregator flush task. The aggregator drains denial
-    // events from the proxy + bypass monitor, batches them, and ships
-    // summaries to the gateway via SubmitPolicyAnalysis.
-    if let (Some(rx), Some(endpoint)) = (denial_rx, openshell_endpoint) {
-        // SubmitPolicyAnalysis resolves by sandbox *name*, not UUID — fall back
-        // to the ID when the name isn't set.
-        let agg_name = sandbox_name
-            .map(str::to_string)
-            .or_else(|| sandbox_id.map(str::to_string))
-            .unwrap_or_default();
-        let agg_endpoint = endpoint.to_string();
-        let flush_interval_secs: u64 = std::env::var("OPENSHELL_DENIAL_FLUSH_INTERVAL_SECS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(10);
-
-        let aggregator = DenialAggregator::new(rx, flush_interval_secs);
-
-        tokio::spawn(async move {
-            aggregator
-                .run(|summaries| {
-                    let endpoint = agg_endpoint.clone();
-                    let sandbox_name = agg_name.clone();
-                    async move {
-                        if let Err(e) =
-                            flush_proposals_to_gateway(&endpoint, &sandbox_name, summaries).await
-                        {
-                            warn!(error = %e, "Failed to flush denial summaries to gateway");
-                        }
-                    }
-                })
-                .await;
+        // If we have a network namespace, bind to the veth host IP so sandboxed
+        // processes can reach the proxy via TCP.
+        #[cfg(target_os = "linux")]
+        let bind_addr = netns.map(|ns| {
+            let port = proxy_policy.http_addr.map_or(3128, |addr| addr.port());
+            SocketAddr::new(ns.host_ip(), port)
         });
-    }
+
+        #[cfg(not(target_os = "linux"))]
+        let bind_addr: Option<SocketAddr> = None;
+
+        // Build inference context for local routing of intercepted inference calls.
+        let inference_ctx = crate::inference_routes::build_inference_context(
+            sandbox_id,
+            openshell_endpoint,
+            inference_routes,
+        )
+        .await?;
+
+        let proxy_handle = ProxyHandle::start_with_bind_addr(
+            proxy_policy,
+            bind_addr,
+            engine,
+            cache,
+            entrypoint_pid.clone(),
+            tls_state,
+            inference_ctx,
+            Some(provider_credentials.clone()),
+            Some(policy_local_ctx.clone()),
+            denial_tx.clone(),
+        )
+        .await?;
+        Some(proxy_handle)
+    } else {
+        None
+    };
 
     // Spawn bypass detection monitor (Linux only, proxy mode only).
     // Reads /dev/kmsg for nftables log entries and emits structured
     // tracing events for direct connection attempts that bypass the proxy.
     #[cfg(target_os = "linux")]
     let bypass_monitor_handle = netns.and_then(|ns| {
-        crate::bypass_monitor::spawn(
-            ns.name().to_string(),
-            entrypoint_pid.clone(),
-            bypass_denial_tx,
-        )
+        crate::bypass_monitor::spawn(ns.name().to_string(), entrypoint_pid.clone(), denial_tx)
     });
 
-    // On non-Linux, bypass_denial_tx is unused (no /dev/kmsg).
+    // On non-Linux, denial_tx is unused (no /dev/kmsg).
     #[cfg(not(target_os = "linux"))]
-    drop(bypass_denial_tx);
+    drop(denial_tx);
 
     // Compute the proxy URL and netns fd for SSH sessions.
     // SSH shell processes need both to enforce network policy:
@@ -426,66 +373,4 @@ pub async fn run_networking(
         ssh_netns_fd,
         policy_local_ctx,
     })
-}
-
-/// Flush aggregated denial summaries to the gateway via `SubmitPolicyAnalysis`.
-async fn flush_proposals_to_gateway(
-    endpoint: &str,
-    sandbox_name: &str,
-    summaries: Vec<FlushableDenialSummary>,
-) -> Result<()> {
-    use openshell_core::grpc_client::CachedOpenShellClient;
-    use openshell_core::proto::{DenialSummary, L7RequestSample};
-
-    let client = CachedOpenShellClient::connect(endpoint).await?;
-
-    let proto_summaries: Vec<DenialSummary> = summaries
-        .into_iter()
-        .map(|s| DenialSummary {
-            sandbox_id: String::new(),
-            host: s.host,
-            port: u32::from(s.port),
-            binary: s.binary,
-            ancestors: s.ancestors,
-            deny_reason: s.deny_reason,
-            first_seen_ms: s.first_seen_ms,
-            last_seen_ms: s.last_seen_ms,
-            count: s.count,
-            suppressed_count: 0,
-            total_count: s.count,
-            sample_cmdlines: s.sample_cmdlines,
-            binary_sha256: String::new(),
-            persistent: false,
-            denial_stage: s.denial_stage,
-            l7_request_samples: s
-                .l7_samples
-                .into_iter()
-                .map(|l| L7RequestSample {
-                    method: l.method,
-                    path: l.path,
-                    decision: "deny".to_string(),
-                    count: l.count,
-                })
-                .collect(),
-            l7_inspection_active: false,
-        })
-        .collect();
-
-    // Run the mechanistic mapper sandbox-side to generate proposals.
-    // The gateway is a thin persistence + validation layer — it never
-    // generates proposals itself.
-    let proposals = mechanistic_mapper::generate_proposals(&proto_summaries);
-
-    info!(
-        sandbox_name = %sandbox_name,
-        summaries = proto_summaries.len(),
-        proposals = proposals.len(),
-        "Flushed denial analysis to gateway"
-    );
-
-    client
-        .submit_policy_analysis(sandbox_name, proto_summaries, proposals, "mechanistic")
-        .await?;
-
-    Ok(())
 }

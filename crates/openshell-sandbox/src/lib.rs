@@ -5,6 +5,9 @@
 //!
 //! This crate provides process sandboxing and monitoring capabilities.
 
+mod denial_aggregator;
+mod mechanistic_mapper;
+
 use miette::Result;
 use std::future::Future;
 use std::sync::Arc;
@@ -54,9 +57,11 @@ pub(crate) use openshell_core::proposals::AGENT_PROPOSALS_ENABLED;
 
 use openshell_core::policy::{NetworkMode, NetworkPolicy, ProxyPolicy, SandboxPolicy};
 use openshell_core::provider_credentials::ProviderCredentialState;
+use openshell_supervisor_network::denial::DenialEvent;
 use openshell_supervisor_network::opa::OpaEngine;
 pub use openshell_supervisor_process::process::{ProcessHandle, ProcessStatus};
 use openshell_supervisor_process::skills;
+use tokio::sync::mpsc::UnboundedSender;
 
 /// Run a command in the sandbox.
 ///
@@ -210,6 +215,18 @@ pub async fn run_sandbox(
         None
     };
 
+    // Denial channel: orchestrator owns both ends. The proxy and (eventually)
+    // the bypass monitor are pure producers — they receive `tx` clones via
+    // their respective leaf entry points. The aggregator drains `rx` here
+    // and ships summaries to the gateway via SubmitPolicyAnalysis.
+    let (denial_tx, denial_rx): (Option<UnboundedSender<DenialEvent>>, _) = if sandbox_id.is_some()
+    {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        (Some(tx), Some(rx))
+    } else {
+        (None, None)
+    };
+
     let mut networking = if network_enabled {
         Some(
             openshell_supervisor_network::run::run_networking(
@@ -224,12 +241,49 @@ pub async fn run_sandbox(
                 sandbox_name_for_agg.as_deref(),
                 openshell_endpoint_for_proxy.as_deref(),
                 inference_routes.as_deref(),
+                denial_tx,
             )
             .await?,
         )
     } else {
         None
     };
+
+    // Spawn the denial-aggregator flush task. The aggregator drains denial
+    // events from the proxy (and, post-relocation, the bypass monitor),
+    // batches them, and ships summaries to the gateway via
+    // `SubmitPolicyAnalysis`.
+    if let (Some(rx), Some(endpoint)) = (denial_rx, openshell_endpoint_for_proxy.as_deref()) {
+        // SubmitPolicyAnalysis resolves by sandbox *name*, not UUID — fall
+        // back to the ID when the name isn't set.
+        let agg_name = sandbox_name_for_agg
+            .clone()
+            .or_else(|| sandbox_id.clone())
+            .unwrap_or_default();
+        let agg_endpoint = endpoint.to_string();
+        let flush_interval_secs: u64 = std::env::var("OPENSHELL_DENIAL_FLUSH_INTERVAL_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10);
+
+        let aggregator = denial_aggregator::DenialAggregator::new(rx, flush_interval_secs);
+
+        tokio::spawn(async move {
+            aggregator
+                .run(|summaries| {
+                    let endpoint = agg_endpoint.clone();
+                    let sandbox_name = agg_name.clone();
+                    async move {
+                        if let Err(e) =
+                            flush_proposals_to_gateway(&endpoint, &sandbox_name, summaries).await
+                        {
+                            warn!(error = %e, "Failed to flush denial summaries to gateway");
+                        }
+                    }
+                })
+                .await;
+        });
+    }
 
     // Spawn background policy poll task (gRPC mode only).
     if let (Some(id), Some(endpoint), Some(engine)) = (
@@ -349,6 +403,68 @@ async fn wait_for_shutdown_signal() {
         let _ = tokio::signal::ctrl_c().await;
         info!("Received Ctrl-C, shutting down network-only supervisor");
     }
+}
+
+/// Flush aggregated denial summaries to the gateway via `SubmitPolicyAnalysis`.
+async fn flush_proposals_to_gateway(
+    endpoint: &str,
+    sandbox_name: &str,
+    summaries: Vec<denial_aggregator::FlushableDenialSummary>,
+) -> Result<()> {
+    use openshell_core::grpc_client::CachedOpenShellClient;
+    use openshell_core::proto::{DenialSummary, L7RequestSample};
+
+    let client = CachedOpenShellClient::connect(endpoint).await?;
+
+    let proto_summaries: Vec<DenialSummary> = summaries
+        .into_iter()
+        .map(|s| DenialSummary {
+            sandbox_id: String::new(),
+            host: s.host,
+            port: u32::from(s.port),
+            binary: s.binary,
+            ancestors: s.ancestors,
+            deny_reason: s.deny_reason,
+            first_seen_ms: s.first_seen_ms,
+            last_seen_ms: s.last_seen_ms,
+            count: s.count,
+            suppressed_count: 0,
+            total_count: s.count,
+            sample_cmdlines: s.sample_cmdlines,
+            binary_sha256: String::new(),
+            persistent: false,
+            denial_stage: s.denial_stage,
+            l7_request_samples: s
+                .l7_samples
+                .into_iter()
+                .map(|l| L7RequestSample {
+                    method: l.method,
+                    path: l.path,
+                    decision: "deny".to_string(),
+                    count: l.count,
+                })
+                .collect(),
+            l7_inspection_active: false,
+        })
+        .collect();
+
+    // Run the mechanistic mapper sandbox-side to generate proposals.
+    // The gateway is a thin persistence + validation layer — it never
+    // generates proposals itself.
+    let proposals = mechanistic_mapper::generate_proposals(&proto_summaries);
+
+    info!(
+        sandbox_name = %sandbox_name,
+        summaries = proto_summaries.len(),
+        proposals = proposals.len(),
+        "Flushed denial analysis to gateway"
+    );
+
+    client
+        .submit_policy_analysis(sandbox_name, proto_summaries, proposals, "mechanistic")
+        .await?;
+
+    Ok(())
 }
 
 // ============================================================================
