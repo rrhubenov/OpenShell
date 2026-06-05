@@ -17,8 +17,6 @@ use std::time::Duration;
 use miette::Result;
 use tracing::{debug, info, warn};
 
-#[cfg(target_os = "linux")]
-use openshell_core::netns::NetworkNamespace;
 use openshell_core::policy::{NetworkMode, SandboxPolicy};
 use openshell_core::proto::SandboxPolicy as ProtoSandboxPolicy;
 use openshell_core::provider_credentials::ProviderCredentialState;
@@ -37,57 +35,6 @@ use crate::l7::tls::{
 use crate::opa::OpaEngine;
 use crate::policy_local::PolicyLocalContext;
 use crate::proxy::ProxyHandle;
-
-/// Create the workload's network namespace and install bypass detection
-/// rules. Returns `None` when the policy is not in proxy mode. Linux-only.
-///
-/// The namespace is shared infrastructure: the proxy binds to its host-side
-/// veth IP and reads /dev/kmsg from inside it for bypass detection, while
-/// the workload child and SSH sessions enter it via `setns()`.
-///
-/// # Errors
-///
-/// Returns an error if proxy mode is requested but the namespace cannot be
-/// created (e.g., missing `CAP_NET_ADMIN` / `CAP_SYS_ADMIN` or `iproute2`).
-/// Failure to install nftables bypass-detection rules is non-fatal and is
-/// reported via OCSF instead.
-#[cfg(target_os = "linux")]
-pub fn create_netns_for_proxy(policy: &SandboxPolicy) -> Result<Option<NetworkNamespace>> {
-    if !matches!(policy.network.mode, NetworkMode::Proxy) {
-        return Ok(None);
-    }
-    match NetworkNamespace::create() {
-        Ok(ns) => {
-            // Install bypass detection rules (nftables log + reject).
-            // This provides fast-fail UX and diagnostic logging for direct
-            // connection attempts that bypass the HTTP CONNECT proxy.
-            let proxy_port = policy
-                .network
-                .proxy
-                .as_ref()
-                .and_then(|p| p.http_addr)
-                .map_or(3128, |addr| addr.port());
-            if let Err(e) = ns.install_bypass_rules(proxy_port) {
-                ocsf_emit!(
-                    ConfigStateChangeBuilder::new(ocsf_ctx())
-                        .severity(SeverityId::Medium)
-                        .status(StatusId::Failure)
-                        .state(StateId::Disabled, "degraded")
-                        .message(format!(
-                            "Failed to install bypass detection rules (non-fatal): {e}"
-                        ))
-                        .build()
-                );
-            }
-            Ok(Some(ns))
-        }
-        Err(e) => Err(miette::miette!(
-            "Network namespace creation failed and proxy mode requires isolation. \
-             Ensure CAP_NET_ADMIN and CAP_SYS_ADMIN are available and iproute2 is installed. \
-             Error: {e}"
-        )),
-    }
-}
 
 /// Handles and values produced by [`run_networking`] that the rest of
 /// `run_sandbox` consumes.

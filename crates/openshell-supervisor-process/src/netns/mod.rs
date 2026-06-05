@@ -378,6 +378,58 @@ impl Drop for NetworkNamespace {
     }
 }
 
+/// Create the workload's network namespace and install bypass detection
+/// rules. Returns `None` when the policy is not in proxy mode.
+///
+/// The namespace is shared infrastructure: the proxy binds to its host-side
+/// veth IP and reads /dev/kmsg from inside it for bypass detection, while
+/// the workload child and SSH sessions enter it via `setns()`.
+///
+/// # Errors
+///
+/// Returns an error if proxy mode is requested but the namespace cannot be
+/// created (e.g., missing `CAP_NET_ADMIN` / `CAP_SYS_ADMIN` or `iproute2`).
+/// Failure to install nftables bypass-detection rules is non-fatal and is
+/// reported via OCSF instead.
+pub fn create_netns_for_proxy(
+    policy: &openshell_core::policy::SandboxPolicy,
+) -> Result<Option<NetworkNamespace>> {
+    use openshell_core::policy::NetworkMode;
+    use openshell_ocsf::{ConfigStateChangeBuilder, SeverityId, StateId, StatusId, ocsf_emit};
+
+    if !matches!(policy.network.mode, NetworkMode::Proxy) {
+        return Ok(None);
+    }
+    match NetworkNamespace::create() {
+        Ok(ns) => {
+            let proxy_port = policy
+                .network
+                .proxy
+                .as_ref()
+                .and_then(|p| p.http_addr)
+                .map_or(3128, |addr| addr.port());
+            if let Err(e) = ns.install_bypass_rules(proxy_port) {
+                ocsf_emit!(
+                    ConfigStateChangeBuilder::new(openshell_ocsf::ctx::ctx())
+                        .severity(SeverityId::Medium)
+                        .status(StatusId::Failure)
+                        .state(StateId::Disabled, "degraded")
+                        .message(format!(
+                            "Failed to install bypass detection rules (non-fatal): {e}"
+                        ))
+                        .build()
+                );
+            }
+            Ok(Some(ns))
+        }
+        Err(e) => Err(miette::miette!(
+            "Network namespace creation failed and proxy mode requires isolation. \
+             Ensure CAP_NET_ADMIN and CAP_SYS_ADMIN are available and iproute2 is installed. \
+             Error: {e}"
+        )),
+    }
+}
+
 /// Run an `ip` command on the host.
 fn run_ip(args: &[&str]) -> Result<()> {
     let ip_path = find_trusted_binary("ip", IP_SEARCH_PATHS)?;

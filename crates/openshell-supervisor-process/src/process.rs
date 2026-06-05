@@ -6,12 +6,12 @@
 use crate::child_env;
 #[cfg(target_os = "linux")]
 use crate::managed_children;
+#[cfg(target_os = "linux")]
+use crate::netns::NetworkNamespace;
 use crate::sandbox;
 use miette::{IntoDiagnostic, Result};
 use nix::sys::signal::{self, Signal};
 use nix::unistd::{Group, Pid, User};
-#[cfg(target_os = "linux")]
-use openshell_core::netns::NetworkNamespace;
 use openshell_core::policy::{NetworkMode, SandboxPolicy};
 use std::collections::HashMap;
 use std::ffi::CString;

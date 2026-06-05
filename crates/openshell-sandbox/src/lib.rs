@@ -210,7 +210,7 @@ pub async fn run_sandbox(
     // of the sandbox.
     #[cfg(target_os = "linux")]
     let netns = if network_enabled {
-        openshell_supervisor_network::run::create_netns_for_proxy(&policy)?
+        openshell_supervisor_process::netns::create_netns_for_proxy(&policy)?
     } else {
         None
     };
@@ -238,7 +238,7 @@ pub async fn run_sandbox(
         #[cfg(target_os = "linux")]
         let proxy_bind_ip = netns
             .as_ref()
-            .map(openshell_core::netns::NetworkNamespace::host_ip);
+            .map(openshell_supervisor_process::netns::NetworkNamespace::host_ip);
         #[cfg(not(target_os = "linux"))]
         let proxy_bind_ip: Option<std::net::IpAddr> = None;
 

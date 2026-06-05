@@ -21,8 +21,6 @@ pub mod image;
 pub mod inference;
 pub mod metadata;
 pub mod net;
-#[cfg(target_os = "linux")]
-pub mod netns;
 pub mod paths;
 pub mod policy;
 pub mod progress;

@@ -22,7 +22,7 @@ use openshell_ocsf::{
 };
 
 #[cfg(target_os = "linux")]
-use openshell_core::netns::NetworkNamespace;
+use crate::netns::NetworkNamespace;
 use openshell_core::policy::{NetworkMode, SandboxPolicy};
 use openshell_core::provider_credentials::ProviderCredentialState;
 

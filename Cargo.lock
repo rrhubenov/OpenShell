@@ -3459,10 +3459,7 @@ version = "0.0.0"
 dependencies = [
  "base64 0.22.1",
  "ipnet",
- "libc",
  "miette",
- "nix",
- "openshell-ocsf",
  "prost",
  "prost-types",
  "protobuf-src",
@@ -3475,7 +3472,6 @@ dependencies = [
  "tonic-build",
  "tracing",
  "url",
- "uuid",
 ]
 
 [[package]]
