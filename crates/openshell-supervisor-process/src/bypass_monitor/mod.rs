@@ -120,6 +120,7 @@ pub fn spawn(
     namespace_name: String,
     entrypoint_pid: Arc<AtomicU32>,
     denial_tx: Option<mpsc::UnboundedSender<DenialEvent>>,
+    activity_tx: Option<ActivitySender>,
 ) -> Option<tokio::task::JoinHandle<()>> {
     use std::io::BufRead;
     use std::process::{Command, Stdio};
@@ -278,6 +279,9 @@ pub fn spawn(
                     l7_method: None,
                     l7_path: None,
                 });
+            }
+            if let Some(ref tx) = activity_tx {
+                let _ = try_record_activity(tx, true, "bypass");
             }
         }
 
