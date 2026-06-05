@@ -334,13 +334,9 @@ pub async fn run_sandbox(
     }
 
     let exit_code = if process_enabled {
-        let (ssh_proxy_url, ssh_netns_fd, ca_file_paths) = match networking.as_mut() {
-            Some(n) => (
-                n.ssh_proxy_url.take(),
-                n.ssh_netns_fd,
-                n.ca_file_paths.clone(),
-            ),
-            None => (None, None, None),
+        let (ssh_proxy_url, ca_file_paths) = match networking.as_mut() {
+            Some(n) => (n.ssh_proxy_url.take(), n.ca_file_paths.clone()),
+            None => (None, None),
         };
 
         openshell_supervisor_process::run::run_process(
@@ -357,7 +353,6 @@ pub async fn run_sandbox(
             provider_credentials,
             provider_env,
             ssh_proxy_url,
-            ssh_netns_fd,
             ca_file_paths,
             #[cfg(target_os = "linux")]
             netns.as_ref(),

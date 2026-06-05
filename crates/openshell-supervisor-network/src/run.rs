@@ -101,7 +101,6 @@ pub struct Networking {
 
     pub ca_file_paths: Option<(std::path::PathBuf, std::path::PathBuf)>,
     pub ssh_proxy_url: Option<String>,
-    pub ssh_netns_fd: Option<i32>,
     /// Policy-local route context: shared with the orchestrator's policy poll
     /// loop so it can publish updated `SandboxPolicy` snapshots that the
     /// `policy.local` route handler returns to the workload.
@@ -318,18 +317,11 @@ pub async fn run_networking(
         None
     };
 
-    // Compute the proxy URL and netns fd for SSH sessions.
-    // SSH shell processes need both to enforce network policy:
-    // - netns_fd: enter the network namespace via setns() so all traffic
-    //   goes through the veth pair (hard enforcement, non-bypassable)
-    // - proxy_url: set proxy env vars so cooperative tools route through the
-    //   CONNECT proxy; this also opts Node.js into honoring those vars
-    #[cfg(target_os = "linux")]
-    let ssh_netns_fd = netns.and_then(NetworkNamespace::ns_fd);
-
-    #[cfg(not(target_os = "linux"))]
-    let ssh_netns_fd: Option<i32> = None;
-
+    // Compute the proxy URL for SSH sessions.
+    // SSH shell processes need a proxy URL so cooperative tools (curl, npm,
+    // Node) route through the CONNECT proxy via env vars. Hard enforcement
+    // (entering the network namespace via setns()) is materialized inside
+    // run_process from the borrowed NetworkNamespace handle.
     let ssh_proxy_url = if matches!(policy.network.mode, NetworkMode::Proxy) {
         #[cfg(target_os = "linux")]
         {
@@ -360,7 +352,6 @@ pub async fn run_networking(
         proxy: proxy_handle,
         ca_file_paths,
         ssh_proxy_url,
-        ssh_netns_fd,
         policy_local_ctx,
     })
 }

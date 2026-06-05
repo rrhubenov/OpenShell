@@ -59,7 +59,6 @@ pub async fn run_process(
     provider_credentials: ProviderCredentialState,
     provider_env: std::collections::HashMap<String, String>,
     ssh_proxy_url: Option<String>,
-    ssh_netns_fd: Option<i32>,
     ca_file_paths: Option<(std::path::PathBuf, std::path::PathBuf)>,
     #[cfg(target_os = "linux")] netns: Option<&NetworkNamespace>,
     #[cfg(target_os = "linux")] bypass_denial_tx: Option<
@@ -181,6 +180,16 @@ pub async fn run_process(
             }
         }
     });
+
+    // Hard network policy enforcement for SSH sessions and the persistent
+    // supervisor session: each session's pre-exec hook calls setns(fd,
+    // CLONE_NEWNET) so it lands inside the workload's network namespace.
+    // Without this, SSH-spawned shells run in the host namespace and bypass
+    // the proxy entirely.
+    #[cfg(target_os = "linux")]
+    let ssh_netns_fd = netns.and_then(NetworkNamespace::ns_fd);
+    #[cfg(not(target_os = "linux"))]
+    let ssh_netns_fd: Option<i32> = None;
 
     let ssh_socket_path: Option<std::path::PathBuf> = ssh_socket_path.map(std::path::PathBuf::from);
     if let Some(listen_path) = ssh_socket_path.clone() {
