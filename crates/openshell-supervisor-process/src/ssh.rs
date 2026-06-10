@@ -97,7 +97,7 @@ fn ssh_server_init(
     Ok((listener, config, ca_paths))
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::implicit_hasher)]
 pub async fn run_ssh_server(
     listen_path: PathBuf,
     ready_tx: tokio::sync::oneshot::Sender<Result<()>>,

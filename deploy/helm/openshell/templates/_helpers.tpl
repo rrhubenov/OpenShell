@@ -103,37 +103,6 @@ Namespace where sandbox pods are created. An explicit
 {{- end }}
 
 {{/*
-Fully qualified name of the PostgreSQL subchart, mirroring the Bitnami
-common.names.fullname template so we stay in sync when users set
-postgres.fullnameOverride or postgres.nameOverride.
-*/}}
-{{- define "openshell.postgresFullname" -}}
-{{- if .Values.postgres.fullnameOverride -}}
-{{- .Values.postgres.fullnameOverride | trunc 63 | trimSuffix "-" -}}
-{{- else -}}
-{{- $name := default "postgres" .Values.postgres.nameOverride -}}
-{{- if contains $name .Release.Name -}}
-{{- .Release.Name | trunc 63 | trimSuffix "-" -}}
-{{- else -}}
-{{- printf "%s-%s" .Release.Name $name | trunc 63 | trimSuffix "-" -}}
-{{- end -}}
-{{- end -}}
-{{- end }}
-
-{{/*
-Name of the Secret holding the PostgreSQL connection URI.
-- server.externalDbSecret set: use it verbatim (always wins)
-- postgres.enabled=true: derive from Bitnami service-binding naming convention
-*/}}
-{{- define "openshell.dbSecretName" -}}
-{{- if .Values.server.externalDbSecret -}}
-{{- .Values.server.externalDbSecret -}}
-{{- else -}}
-{{- printf "%s-svcbind-custom-user" (include "openshell.postgresFullname" .) -}}
-{{- end -}}
-{{- end }}
-
-{{/*
 Name of the Secret holding gateway-minted sandbox JWT signing material.
 */}}
 {{- define "openshell.sandboxJwtSecretName" -}}
@@ -172,5 +141,17 @@ init-container
 {{- else -}}
 {{- $scheme := ternary "http" "https" (default false .Values.server.disableTls) -}}
 {{- printf "%s://%s.%s.svc.cluster.local:%d" $scheme (include "openshell.fullname" .) .Release.Namespace (int .Values.service.port) -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Validate chart values that Helm would otherwise accept silently.
+*/}}
+{{- define "openshell.validateValues" -}}
+{{- if and (hasKey .Values "postgres") (kindIs "map" .Values.postgres) (hasKey .Values.postgres "enabled") -}}
+{{- fail "postgres.enabled was removed; the OpenShell chart no longer deploys PostgreSQL. Provision PostgreSQL separately and set server.externalDbSecret to a Secret containing a PostgreSQL URI." -}}
+{{- end -}}
+{{- if and (gt (int (default 1 .Values.replicaCount)) 1) (not .Values.server.externalDbSecret) -}}
+{{- fail "replicaCount > 1 requires server.externalDbSecret; multiple gateway replicas cannot share the default per-pod SQLite database." -}}
 {{- end -}}
 {{- end }}
