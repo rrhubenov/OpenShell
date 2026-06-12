@@ -19,7 +19,7 @@ use std::ffi::CString;
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 #[cfg(target_os = "linux")]
 use std::os::unix::ffi::OsStrExt;
-#[cfg(any(test, target_os = "linux"))]
+#[cfg(any(test, unix))]
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -791,7 +791,7 @@ pub fn validate_sandbox_user(policy: &SandboxPolicy) -> Result<()> {
 /// still needs to be chowned to the sandbox user/group. Existing paths keep
 /// their image-defined ownership.
 #[cfg(unix)]
-fn prepare_read_write_path(path: &std::path::Path) -> Result<bool> {
+fn prepare_read_write_path(path: &Path) -> Result<bool> {
     // SECURITY: use symlink_metadata (lstat) to inspect each path *before*
     // calling chown. chown follows symlinks, so a malicious container image
     // could place a symlink (e.g. /sandbox -> /etc/shadow) to trick the
