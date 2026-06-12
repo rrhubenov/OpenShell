@@ -11,7 +11,7 @@ use miette::{Result, miette};
 use openshell_core::proto::{ProviderCredentialTokenGrant, ProviderProfileCredential};
 use openshell_ocsf::{
     ActionId, ActivityId, DispositionId, Endpoint, HttpActivityBuilder, HttpRequest, SeverityId,
-    StatusId, Url as OcsfUrl, ocsf_emit,
+    StatusId, Url as OcsfUrl, ctx::ctx as ocsf_ctx, ocsf_emit,
 };
 use tracing::warn;
 
@@ -97,7 +97,7 @@ pub async fn inject_if_needed(req: L7Request, ctx: &L7EvalContext) -> Result<L7R
                     inject_token_grant_header(&req.raw_header, &cred, &access_token)?;
                 let provider_key = ocsf_message_field(&provider_key);
                 ocsf_emit!(
-                    HttpActivityBuilder::new(crate::ocsf_ctx())
+                    HttpActivityBuilder::new(ocsf_ctx())
                         .activity(ActivityId::Other)
                         .action(ActionId::Allowed)
                         .disposition(DispositionId::Allowed)
@@ -131,7 +131,7 @@ pub async fn inject_if_needed(req: L7Request, ctx: &L7EvalContext) -> Result<L7R
                 );
                 let provider_key = ocsf_message_field(&provider_key);
                 ocsf_emit!(
-                    HttpActivityBuilder::new(crate::ocsf_ctx())
+                    HttpActivityBuilder::new(ocsf_ctx())
                         .activity(ActivityId::Fail)
                         .action(ActionId::Denied)
                         .disposition(DispositionId::Blocked)

@@ -13,7 +13,7 @@ const MAX_RETAINED_CREDENTIAL_GENERATIONS: usize = 8;
 pub struct ProviderCredentialSnapshot {
     pub revision: u64,
     pub child_env: HashMap<String, String>,
-    pub dynamic_credentials: HashMap<String, openshell_core::proto::ProviderProfileCredential>,
+    pub dynamic_credentials: HashMap<String, crate::proto::ProviderProfileCredential>,
 }
 
 #[derive(Debug)]
@@ -34,7 +34,7 @@ impl ProviderCredentialState {
         revision: u64,
         env: HashMap<String, String>,
         credential_expires_at_ms: HashMap<String, i64>,
-        dynamic_credentials: HashMap<String, openshell_core::proto::ProviderProfileCredential>,
+        dynamic_credentials: HashMap<String, crate::proto::ProviderProfileCredential>,
     ) -> Self {
         let (child_env, generation_resolver, current_resolver) =
             SecretResolver::from_provider_env_for_current_revision(
@@ -82,7 +82,7 @@ impl ProviderCredentialState {
         revision: u64,
         env: HashMap<String, String>,
         credential_expires_at_ms: HashMap<String, i64>,
-        dynamic_credentials: HashMap<String, openshell_core::proto::ProviderProfileCredential>,
+        dynamic_credentials: HashMap<String, crate::proto::ProviderProfileCredential>,
     ) -> usize {
         let (child_env, generation_resolver, current_resolver) =
             SecretResolver::from_provider_env_for_current_revision(

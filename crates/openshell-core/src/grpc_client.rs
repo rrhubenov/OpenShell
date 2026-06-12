@@ -717,7 +717,7 @@ pub struct ProviderEnvironmentResult {
     pub environment: HashMap<String, String>,
     pub provider_env_revision: u64,
     pub credential_expires_at_ms: HashMap<String, i64>,
-    pub dynamic_credentials: HashMap<String, openshell_core::proto::ProviderProfileCredential>,
+    pub dynamic_credentials: HashMap<String, crate::proto::ProviderProfileCredential>,
 }
 
 impl CachedOpenShellClient {
