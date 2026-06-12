@@ -191,29 +191,31 @@ pub fn is_internal_ip(ip: IpAddr) -> bool {
 /// IPv4 internal address check covering RFC 1918, CGNAT (RFC 6598), and other
 /// special-use ranges that should never be reachable from sandbox egress.
 fn is_internal_v4(v4: Ipv4Addr) -> bool {
-    if v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified() {
+    // Prefer the stable `Ipv4Addr` predicates. `is_documentation()` (RFC 5737)
+    // covers all three TEST-NET ranges, including 192.0.2.0/24 (TEST-NET-1) which
+    // the previous manual checks missed.
+    if v4.is_loopback()
+        || v4.is_private()
+        || v4.is_link_local()
+        || v4.is_unspecified()
+        || v4.is_documentation()
+        || v4.is_broadcast()
+    {
         return true;
     }
     let octets = v4.octets();
-    // 100.64.0.0/10 — CGNAT / shared address space (RFC 6598). Commonly used by
-    // cloud VPC peering, Tailscale, and similar overlay networks.
+    // The ranges below have no stable std predicate yet, so keep them manual.
+    // 100.64.0.0/10 — CGNAT / shared address space (RFC 6598; `is_shared` is
+    // unstable). Commonly used by cloud VPC peering, Tailscale, and similar overlays.
     if octets[0] == 100 && (octets[1] & 0xC0) == 64 {
         return true;
     }
-    // 192.0.0.0/24 — IETF protocol assignments (RFC 6890)
+    // 192.0.0.0/24 — IETF protocol assignments (RFC 6890; no stable predicate).
     if octets[0] == 192 && octets[1] == 0 && octets[2] == 0 {
         return true;
     }
-    // 198.18.0.0/15 — benchmarking (RFC 2544)
+    // 198.18.0.0/15 — benchmarking (RFC 2544; `is_benchmarking` is unstable).
     if octets[0] == 198 && (octets[1] & 0xFE) == 18 {
-        return true;
-    }
-    // 198.51.100.0/24 — TEST-NET-2 (RFC 5737)
-    if octets[0] == 198 && octets[1] == 51 && octets[2] == 100 {
-        return true;
-    }
-    // 203.0.113.0/24 — TEST-NET-3 (RFC 5737)
-    if octets[0] == 203 && octets[1] == 0 && octets[2] == 113 {
         return true;
     }
     false
@@ -567,10 +569,14 @@ mod tests {
         // 198.18.0.0/15 — benchmarking
         assert!(is_internal_ip(IpAddr::V4(Ipv4Addr::new(198, 18, 0, 1))));
         assert!(is_internal_ip(IpAddr::V4(Ipv4Addr::new(198, 19, 255, 255))));
+        // 192.0.2.0/24 — TEST-NET-1 (RFC 5737), now covered via is_documentation()
+        assert!(is_internal_ip(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1))));
         // 198.51.100.0/24 — TEST-NET-2
         assert!(is_internal_ip(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1))));
         // 203.0.113.0/24 — TEST-NET-3
         assert!(is_internal_ip(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1))));
+        // 255.255.255.255 — limited broadcast (RFC 919), via is_broadcast()
+        assert!(is_internal_ip(IpAddr::V4(Ipv4Addr::BROADCAST)));
     }
 
     #[test]

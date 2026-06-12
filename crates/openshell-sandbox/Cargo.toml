@@ -25,7 +25,7 @@ openshell-supervisor-process = { path = "../openshell-supervisor-process" }
 tokio = { workspace = true }
 
 # gRPC (tonic::Status downcast in error mapping)
-tonic = { workspace = true, features = ["channel", "tls"] }
+tonic = { workspace = true, features = ["channel", "tls-native-roots"] }
 
 # CLI
 clap = { workspace = true }

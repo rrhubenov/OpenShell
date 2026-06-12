@@ -7,6 +7,17 @@
 # server.externalDbSecret because the default SQLite backend is per pod.
 replicaCount: 1
 
+workload:
+  # -- Gateway workload controller kind. Use `statefulset` for the default
+  # SQLite database, or `deployment` when server.externalDbSecret points at an
+  # external database.
+  kind: statefulset
+  # -- Allow replicaCount > 1 while rendering a StatefulSet. Prefer
+  # workload.kind=deployment for external database-backed multi-replica
+  # gateways; this override exists for operators who explicitly require
+  # StatefulSet identity or storage semantics.
+  allowMultiReplicaStatefulSet: false
+
 image:
   # -- Gateway image repository.
   repository: ghcr.io/nvidia/openshell/gateway
@@ -196,6 +207,17 @@ server:
   # -- Enable plaintext HTTP routing for loopback sandbox service URLs on
   # TLS-enabled gateways.
   enableLoopbackServiceHttp: true
+  # Optional gateway-wide gRPC request rate limit. Applies only to gRPC API
+  # traffic after protocol multiplexing; health, metrics, and loopback service
+  # HTTP routes are not rate limited. Both values must be positive to enable the
+  # limit, otherwise it is omitted from the rendered config and stays disabled.
+  grpcRateLimit:
+    # -- Maximum gRPC requests allowed per window. Must be positive (alongside
+    # windowSeconds) to enable rate limiting; 0 (default) disables it.
+    requests: 0
+    # -- gRPC rate-limit window length in seconds. Must be positive (alongside
+    # requests) to enable rate limiting; 0 (default) disables it.
+    windowSeconds: 0
   auth:
     # -- UNSAFE: accept unauthenticated CLI/user requests as a local developer
     # principal. Intended only for trusted local Skaffold/k3d development or a
@@ -233,6 +255,16 @@ server:
     # (owner-read only). Override to 0440 or 0444 if the container UID
     # does not match the volume file owner.
     secretDefaultMode: ""
+  # Dynamic provider token grants. When SPIFFE is enabled here, sandbox
+  # supervisors mount the SPIFFE Workload API socket so provider profiles can
+  # exchange JWT-SVIDs for upstream access tokens. Supervisor-to-gateway
+  # authentication still uses gateway-minted sandbox JWTs.
+  providerTokenGrants:
+    spiffe:
+      # -- Mount the SPIFFE Workload API socket into sandbox pods for dynamic provider token grants.
+      enabled: false
+      # -- Path to the SPIFFE Workload API socket mounted into sandbox pods.
+      workloadApiSocketPath: /spiffe-workload-api/spire-agent.sock
   # OIDC (OpenID Connect) configuration for JWT-based authentication.
   # When issuer is set, the server validates Bearer tokens on gRPC requests.
   oidc:

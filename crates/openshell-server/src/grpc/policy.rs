@@ -14,6 +14,7 @@ use crate::ServerState;
 use crate::auth::principal::Principal;
 use crate::persistence::{DraftChunkRecord, ObjectId, ObjectName, ObjectType, PolicyRecord, Store};
 use crate::policy_store::PolicyStoreExt;
+use openshell_core::net::is_internal_ip;
 use openshell_core::proto::policy_merge_operation;
 use openshell_core::proto::setting_value;
 use openshell_core::proto::{
@@ -1256,6 +1257,7 @@ pub(super) async fn compute_provider_env_revision(
                     Status::internal(format!("decode provider '{provider_name}' failed: {e}"))
                 })?;
                 hasher.update(provider.r#type.as_bytes());
+                hash_provider_profile_revision(store, &provider.r#type, &mut hasher).await?;
 
                 let mut credential_keys: Vec<_> = provider.credentials.keys().collect();
                 credential_keys.sort();
@@ -1279,6 +1281,41 @@ pub(super) async fn compute_provider_env_revision(
     Ok(u64::from_le_bytes(digest[..8].try_into().map_err(
         |_| Status::internal("provider env revision digest too short"),
     )?))
+}
+
+async fn hash_provider_profile_revision(
+    store: &Store,
+    provider_type: &str,
+    hasher: &mut Sha256,
+) -> Result<(), Status> {
+    if let Some(profile) = get_default_profile(provider_type) {
+        hasher.update(b"builtin-profile");
+        hasher.update(profile.to_proto().encode_to_vec());
+        return Ok(());
+    }
+
+    hasher.update(b"custom-profile");
+    match store
+        .get_by_name(
+            openshell_core::proto::StoredProviderProfile::object_type(),
+            provider_type,
+        )
+        .await
+        .map_err(|e| {
+            Status::internal(format!(
+                "fetch provider profile '{provider_type}' failed: {e}"
+            ))
+        })? {
+        Some(record) => {
+            hasher.update(record.id.as_bytes());
+            hasher.update(record.updated_at_ms.to_le_bytes());
+            hasher.update(record.payload.as_slice());
+        }
+        None => {
+            hasher.update(b"missing");
+        }
+    }
+    Ok(())
 }
 
 async fn profile_provider_policy_layers(
@@ -1389,6 +1426,7 @@ pub(super) async fn handle_get_sandbox_provider_environment(
         environment: provider_environment.environment,
         provider_env_revision,
         credential_expires_at_ms: provider_environment.credential_expires_at_ms,
+        dynamic_credentials: provider_environment.dynamic_credentials,
     }))
 }
 
@@ -3171,13 +3209,15 @@ fn policy_record_to_revision(record: &PolicyRecord, include_policy: bool) -> San
 fn generate_security_notes(host: &str, port: u16) -> String {
     let mut notes = Vec::new();
 
-    if host.starts_with("10.")
-        || host.starts_with("172.")
-        || host.starts_with("192.168.")
-        || host == "localhost"
-        || host.starts_with("127.")
-        || host.starts_with("169.254.")
-    {
+    // Flag destinations that are an internal/private address. Parse the host as
+    // an IP literal and defer to the canonical RFC-accurate classifier
+    // (openshell-core net::is_internal_ip) rather than naive string prefixes:
+    // `starts_with("172.")` wrongly matched 172.0-15 / 172.32-255 (RFC 1918 is
+    // only 172.16.0.0/12) and missed CGNAT (100.64.0.0/10), IPv6 ULA, etc. The
+    // "localhost" hostname is not an IP literal, so it is checked separately.
+    // See #1777.
+    let resolves_internal = host.parse::<IpAddr>().is_ok_and(is_internal_ip);
+    if resolves_internal || host == "localhost" {
         notes.push(format!(
             "Destination '{host}' appears to be an internal/private address."
         ));
@@ -3891,6 +3931,27 @@ mod tests {
                 trust_domain: Some("openshell".to_string()),
             }));
         request
+    }
+
+    #[test]
+    fn security_notes_use_canonical_internal_ip_classifier() {
+        // RFC 1918 is 172.16.0.0/12 only: the old starts_with("172.") prefix
+        // wrongly flagged 172.15/172.32 and missed CGNAT (100.64.0.0/10). #1777.
+        assert!(generate_security_notes("172.16.0.1", 80).contains("internal/private"));
+        assert!(!generate_security_notes("172.15.0.1", 80).contains("internal/private"));
+        assert!(!generate_security_notes("172.32.0.1", 80).contains("internal/private"));
+        assert!(generate_security_notes("100.64.0.1", 80).contains("internal/private"));
+        assert!(generate_security_notes("10.0.0.1", 80).contains("internal/private"));
+        assert!(generate_security_notes("192.168.1.1", 80).contains("internal/private"));
+        assert!(generate_security_notes("127.0.0.1", 80).contains("internal/private"));
+        assert!(generate_security_notes("localhost", 80).contains("internal/private"));
+        assert!(!generate_security_notes("8.8.8.8", 80).contains("internal/private"));
+        // Hostnames that merely start with a private-range prefix must NOT be
+        // flagged: classification parses an IP literal, not a string prefix. #1824.
+        assert!(!generate_security_notes("10.example.com", 80).contains("internal/private"));
+        assert!(!generate_security_notes("172.example.com", 80).contains("internal/private"));
+        // IPv6 ULA (fc00::/7, RFC 4193) is internal/private.
+        assert!(generate_security_notes("fd00::1", 80).contains("internal/private"));
     }
 
     #[test]
@@ -4880,6 +4941,88 @@ mod tests {
         assert_eq!(
             second.environment.get("GITHUB_TOKEN"),
             Some(&"rotated".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_env_revision_changes_when_custom_profile_token_grant_changes() {
+        use openshell_core::proto::{
+            ProviderCredentialTokenGrant, ProviderProfile, ProviderProfileCategory,
+            ProviderProfileCredential, StoredProviderProfile,
+        };
+        use std::time::Duration;
+
+        fn token_grant_profile(token_endpoint: &str) -> StoredProviderProfile {
+            StoredProviderProfile {
+                metadata: Some(openshell_core::proto::datamodel::v1::ObjectMeta {
+                    id: "profile-custom-token".to_string(),
+                    name: "custom-token".to_string(),
+                    created_at_ms: 1_000_000,
+                    labels: HashMap::new(),
+                    resource_version: 0,
+                }),
+                profile: Some(ProviderProfile {
+                    id: "custom-token".to_string(),
+                    display_name: "Custom Token".to_string(),
+                    description: String::new(),
+                    category: ProviderProfileCategory::Other as i32,
+                    credentials: vec![ProviderProfileCredential {
+                        name: "access_token".to_string(),
+                        auth_style: "bearer".to_string(),
+                        header_name: "authorization".to_string(),
+                        token_grant: Some(ProviderCredentialTokenGrant {
+                            token_endpoint: token_endpoint.to_string(),
+                            audience: "api://default".to_string(),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }],
+                    endpoints: vec![NetworkEndpoint {
+                        host: "api.custom.example".to_string(),
+                        port: 443,
+                        ..Default::default()
+                    }],
+                    binaries: Vec::new(),
+                    inference_capable: false,
+                    discovery: None,
+                }),
+            }
+        }
+
+        let state = test_server_state().await;
+        state
+            .store
+            .put_message(&test_provider("work-custom-token", "custom-token"))
+            .await
+            .unwrap();
+        state
+            .store
+            .put_message(&token_grant_profile("https://auth.example.com/token"))
+            .await
+            .unwrap();
+
+        let first =
+            compute_provider_env_revision(state.store.as_ref(), &["work-custom-token".to_string()])
+                .await
+                .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        state
+            .store
+            .put_message(&token_grant_profile(
+                "https://auth.example.com/rotated-token",
+            ))
+            .await
+            .unwrap();
+
+        let second =
+            compute_provider_env_revision(state.store.as_ref(), &["work-custom-token".to_string()])
+                .await
+                .unwrap();
+
+        assert_ne!(
+            first, second,
+            "custom provider profile updates must trigger sandbox dynamic credential refresh"
         );
     }
 

@@ -12,7 +12,7 @@
 //! The LLM-powered `PolicyAdvisor` (issue #205) wraps and enriches these
 //! mechanistic proposals with context-aware rationale and smarter grouping.
 
-use openshell_core::net::{is_always_blocked_ip, is_known_metadata_hostname};
+use openshell_core::net::{is_always_blocked_ip, is_internal_ip, is_known_metadata_hostname};
 use openshell_core::proto::{
     DenialSummary, L7Allow, L7Rule, NetworkBinary, NetworkEndpoint, NetworkPolicyRule, PolicyChunk,
 };
@@ -293,14 +293,15 @@ fn generate_security_notes(host: &str, port: u16, is_ssrf: bool) -> String {
         );
     }
 
-    // Check for private/reserved IP patterns in the host.
-    if host.starts_with("10.")
-        || host.starts_with("172.")
-        || host.starts_with("192.168.")
-        || host == "localhost"
-        || host.starts_with("127.")
-        || host.starts_with("169.254.")
-    {
+    // Flag destinations that are an internal/private address. Parse the host as
+    // an IP literal and defer to the canonical RFC-accurate classifier
+    // (openshell-core net::is_internal_ip) rather than naive string prefixes:
+    // `starts_with("172.")` wrongly matched 172.0-15 / 172.32-255 (RFC 1918 is
+    // only 172.16.0.0/12) and missed CGNAT (100.64.0.0/10), IPv6 ULA, etc. The
+    // "localhost" hostname is not an IP literal, so it is checked separately.
+    // See #1777.
+    let resolves_internal = host.parse::<IpAddr>().is_ok_and(is_internal_ip);
+    if resolves_internal || host == "localhost" {
         notes.push(format!(
             "Destination '{host}' appears to be an internal/private address."
         ));
@@ -468,6 +469,29 @@ mod tests {
     fn test_security_notes_ssrf() {
         let notes = generate_security_notes("169.254.169.254", 80, true);
         assert!(notes.contains("SSRF"));
+    }
+
+    #[test]
+    fn test_security_notes_internal_ip_uses_canonical_classifier() {
+        // RFC 1918 is 172.16.0.0/12 only: the old starts_with("172.") prefix
+        // wrongly flagged 172.15/172.32 and missed CGNAT (100.64.0.0/10). #1777.
+        assert!(generate_security_notes("172.16.0.1", 80, false).contains("internal/private"));
+        assert!(!generate_security_notes("172.15.0.1", 80, false).contains("internal/private"));
+        assert!(!generate_security_notes("172.32.0.1", 80, false).contains("internal/private"));
+        assert!(generate_security_notes("100.64.0.1", 80, false).contains("internal/private"));
+        assert!(generate_security_notes("10.0.0.1", 80, false).contains("internal/private"));
+        assert!(generate_security_notes("192.168.1.1", 80, false).contains("internal/private"));
+        assert!(generate_security_notes("127.0.0.1", 80, false).contains("internal/private"));
+        assert!(generate_security_notes("localhost", 80, false).contains("internal/private"));
+        assert!(!generate_security_notes("8.8.8.8", 80, false).contains("internal/private"));
+        // Hostnames that merely start with a private-range prefix must NOT be
+        // flagged: classification parses an IP literal, not a string prefix. #1824.
+        assert!(!generate_security_notes("10.example.com", 80, false).contains("internal/private"));
+        assert!(
+            !generate_security_notes("172.example.com", 80, false).contains("internal/private")
+        );
+        // IPv6 ULA (fc00::/7, RFC 4193) is internal/private.
+        assert!(generate_security_notes("fd00::1", 80, false).contains("internal/private"));
     }
 
     #[test]

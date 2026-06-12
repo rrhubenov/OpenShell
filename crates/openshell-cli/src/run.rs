@@ -21,8 +21,11 @@ use miette::{IntoDiagnostic, Result, WrapErr, miette};
 use openshell_bootstrap::{
     GatewayMetadata, clear_active_gateway, clear_last_sandbox_if_matches,
     extract_host_from_ssh_destination, get_gateway_metadata, list_gateways, load_active_gateway,
-    remove_gateway_metadata, resolve_ssh_hostname, save_active_gateway, save_last_sandbox,
-    store_gateway_metadata,
+    load_user_active_gateway, remove_gateway_metadata, resolve_ssh_hostname, save_active_gateway,
+    save_last_sandbox, store_gateway_metadata,
+};
+use openshell_bootstrap::{
+    GatewayMetadataSource, ListedGateway, gateway_metadata_source, list_gateways_with_source,
 };
 use openshell_core::progress::{
     PROGRESS_ACTIVE_DETAIL_KEY, PROGRESS_ACTIVE_STEP_KEY, PROGRESS_COMPLETE_LABEL_KEY,
@@ -923,21 +926,24 @@ pub async fn gateway_add(
         &derived_name
     };
 
-    // Fail if a gateway with this name already exists.
-    if get_gateway_metadata(name).is_some() {
-        return Err(miette::miette!(
-            "Gateway '{}' already exists.\n\
-             Remove it first with: openshell gateway remove {}\n\
-             Or choose a different name with: --name <name>",
-            name,
-            name,
-        ));
+    match gateway_metadata_source(name)? {
+        Some(GatewayMetadataSource::User) => {
+            return Err(miette::miette!(
+                "Gateway '{}' already exists.\n\
+                 Remove it first with: openshell gateway remove {}\n\
+                 Or choose a different name with: --name <name>",
+                name,
+                name,
+            ));
+        }
+        Some(GatewayMetadataSource::System) | None => {}
     }
 
     // OIDC takes precedence over plaintext/mTLS/edge detection — the user
     // explicitly opted in with --oidc-issuer regardless of scheme.
     if let Some(issuer) = oidc_issuer {
-        let previous_active = load_active_gateway();
+        let previous_active = load_user_active_gateway();
+
         let metadata = GatewayMetadata {
             name: name.to_string(),
             gateway_endpoint: endpoint.clone(),
@@ -1128,7 +1134,8 @@ pub async fn gateway_add(
         eprintln!("{} TLS certificates present", "✓".green().bold());
     } else {
         // Cloud (edge-authenticated) gateway.
-        let previous_active = load_active_gateway();
+        let previous_active = load_user_active_gateway();
+
         let metadata = GatewayMetadata {
             name: name.to_string(),
             gateway_endpoint: endpoint.clone(),
@@ -1284,7 +1291,7 @@ pub fn gateway_logout(name: &str) -> Result<()> {
 
 /// List all registered gateways.
 pub fn gateway_list(gateway_flag: &Option<String>, output: &str) -> Result<()> {
-    let gateways = list_gateways()?;
+    let gateways = list_gateways_with_source()?;
     let active = gateway_flag.clone().or_else(load_active_gateway);
 
     if crate::output::print_output_collection(output, &gateways, |g| gateway_to_json(g, &active))? {
@@ -1304,41 +1311,52 @@ pub fn gateway_list(gateway_flag: &Option<String>, output: &str) -> Result<()> {
     // Calculate column widths
     let name_width = gateways
         .iter()
-        .map(|g| g.name.len())
+        .map(|g| g.metadata.name.len())
         .max()
         .unwrap_or(4)
         .max(4);
     let endpoint_width = gateways
         .iter()
-        .map(|g| g.gateway_endpoint.len())
+        .map(|g| g.metadata.gateway_endpoint.len())
         .max()
         .unwrap_or(8)
         .max(8);
     let type_width = gateways
         .iter()
-        .map(|g| gateway_type_label(g).len())
+        .map(|g| gateway_type_label(&g.metadata).len())
         .max()
         .unwrap_or(4)
         .max(4);
+    let source_width = gateways
+        .iter()
+        .map(|g| g.source.label().len())
+        .max()
+        .unwrap_or(6)
+        .max(6);
 
     // Print header
     println!(
-        "  {:<name_width$}  {:<endpoint_width$}  {:<type_width$}  {}",
+        "  {:<name_width$}  {:<endpoint_width$}  {:<type_width$}  {:<source_width$}  {}",
         "NAME".bold(),
         "ENDPOINT".bold(),
         "TYPE".bold(),
+        "SOURCE".bold(),
         "AUTH".bold(),
     );
 
     // Print rows
-    for gateway in &gateways {
-        let is_active = active.as_deref() == Some(&gateway.name);
+    for gateway in gateways {
+        let metadata = &gateway.metadata;
+        let is_active = active.as_deref() == Some(&metadata.name);
         let marker = if is_active { "*" } else { " " };
-        let gw_type = gateway_type_label(gateway);
-        let gw_auth = gateway_auth_label(gateway);
+        let gw_type = gateway_type_label(metadata);
+        let gw_auth = gateway_auth_label(metadata);
         let line = format!(
-            "{marker} {:<name_width$}  {:<endpoint_width$}  {:<type_width$}  {gw_auth}",
-            gateway.name, gateway.gateway_endpoint, gw_type,
+            "{marker} {:<name_width$}  {:<endpoint_width$}  {:<type_width$}  {:<source_width$}  {gw_auth}",
+            metadata.name,
+            metadata.gateway_endpoint,
+            gw_type,
+            gateway.source.label(),
         );
         if is_active {
             println!("{}", line.green());
@@ -1350,13 +1368,15 @@ pub fn gateway_list(gateway_flag: &Option<String>, output: &str) -> Result<()> {
     Ok(())
 }
 
-fn gateway_to_json(gateway: &GatewayMetadata, active: &Option<String>) -> serde_json::Value {
+fn gateway_to_json(gateway: &ListedGateway, active: &Option<String>) -> serde_json::Value {
+    let metadata = &gateway.metadata;
     serde_json::json!({
-        "name": gateway.name,
-        "endpoint": gateway.gateway_endpoint,
-        "type": gateway_type_label(gateway),
-        "auth": gateway_auth_label(gateway),
-        "active": active.as_deref() == Some(&gateway.name),
+        "name": metadata.name,
+        "endpoint": metadata.gateway_endpoint,
+        "type": gateway_type_label(metadata),
+        "source": gateway.source.label(),
+        "auth": gateway_auth_label(metadata),
+        "active": active.as_deref() == Some(&metadata.name),
     })
 }
 
@@ -1455,11 +1475,20 @@ fn remove_gateway_registration(name: &str) {
 
 /// Remove a local gateway registration without touching the gateway service.
 pub fn gateway_remove(name: &str) -> Result<()> {
-    if get_gateway_metadata(name).is_none() {
-        return Err(miette::miette!(
-            "No gateway metadata found for '{name}'.\n\
-             List available gateways: openshell gateway select"
-        ));
+    match gateway_metadata_source(name)? {
+        Some(GatewayMetadataSource::User) => {}
+        Some(GatewayMetadataSource::System) => {
+            return Err(miette::miette!(
+                "Gateway registration '{name}' is installed by the system and cannot be removed from user config.\n\
+                 Register a per-user gateway with the same name to override it, or select another gateway."
+            ));
+        }
+        None => {
+            return Err(miette::miette!(
+                "No gateway metadata found for '{name}'.\n\
+                 List available gateways: openshell gateway select"
+            ));
+        }
     }
 
     remove_gateway_registration(name);
@@ -1725,7 +1754,6 @@ pub async fn sandbox_create(
     uploads: &[(String, Option<String>, bool)],
     keep: bool,
     gpu: bool,
-    gpu_device: Option<&str>,
     cpu: Option<&str>,
     memory: Option<&str>,
     driver_config_json: Option<&str>,
@@ -1781,7 +1809,7 @@ pub async fn sandbox_create(
         }
         None => None,
     };
-    let requested_gpu = gpu || image.as_deref().is_some_and(image_requests_gpu);
+    let requested_gpu = gpu;
 
     let providers_v2_enabled = gateway_providers_v2_enabled(&mut client).await?;
     let inferred_types: Vec<String> = if providers_v2_enabled {
@@ -1817,7 +1845,6 @@ pub async fn sandbox_create(
     let request = CreateSandboxRequest {
         spec: Some(SandboxSpec {
             gpu: requested_gpu,
-            gpu_device: gpu_device.unwrap_or_default().to_string(),
             environment: environment.clone(),
             policy,
             providers: configured_providers,
@@ -2386,19 +2413,6 @@ fn value_is_explicit_local_path(value: &str) -> bool {
 
 fn value_looks_like_bare_dockerfile_name(value: &str) -> bool {
     !value.contains('/') && !value.contains(':') && filename_looks_like_dockerfile(Path::new(value))
-}
-
-fn image_requests_gpu(image: &str) -> bool {
-    let image_name = image
-        .rsplit('/')
-        .next()
-        .unwrap_or(image)
-        .split([':', '@'])
-        .next()
-        .unwrap_or(image)
-        .to_ascii_lowercase();
-
-    image_name.contains("gpu")
 }
 
 fn dockerfile_sources_supported_for_gateway(metadata: Option<&GatewayMetadata>) -> bool {
@@ -4481,7 +4495,8 @@ fn missing_credentials_error(provider_type: &str) -> miette::Report {
 
     miette::miette!(
         "no credentials resolved for provider type '{provider_type}'. \
-         Use --credential KEY[=VALUE] or --from-existing with the appropriate env vars set."
+         Use --credential KEY[=VALUE], --runtime-credentials for runtime-resolved profile credentials, \
+         or --from-existing with the appropriate env vars set."
     )
 }
 
@@ -4496,14 +4511,45 @@ pub async fn provider_create(
     config: &[String],
     tls: &TlsOptions,
 ) -> Result<()> {
-    if from_gcloud_adc && (from_existing || !credentials.is_empty()) {
+    provider_create_with_options(
+        server,
+        name,
+        provider_type,
+        from_existing,
+        credentials,
+        from_gcloud_adc,
+        false,
+        config,
+        tls,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn provider_create_with_options(
+    server: &str,
+    name: &str,
+    provider_type: &str,
+    from_existing: bool,
+    credentials: &[String],
+    from_gcloud_adc: bool,
+    runtime_credentials: bool,
+    config: &[String],
+    tls: &TlsOptions,
+) -> Result<()> {
+    if from_gcloud_adc && (from_existing || !credentials.is_empty() || runtime_credentials) {
         return Err(miette::miette!(
-            "--from-gcloud-adc cannot be combined with --from-existing or --credential"
+            "--from-gcloud-adc cannot be combined with --from-existing or --credential; it also cannot be combined with --runtime-credentials"
         ));
     }
-    if from_existing && !credentials.is_empty() {
+    if from_existing && (!credentials.is_empty() || runtime_credentials) {
         return Err(miette::miette!(
-            "--from-existing cannot be combined with --credential"
+            "--from-existing cannot be combined with --credential or --runtime-credentials"
+        ));
+    }
+    if runtime_credentials && !credentials.is_empty() {
+        return Err(miette::miette!(
+            "--runtime-credentials cannot be combined with --credential"
         ));
     }
 
@@ -4566,11 +4612,25 @@ pub async fn provider_create(
         if from_existing {
             return Err(missing_credentials_error(&provider_type));
         }
-        let allows_refresh_bootstrap = fetch_provider_profile(&mut client, &provider_type)
-            .await
-            .ok()
-            .is_some_and(|profile| provider_profile_allows_refresh_bootstrap(&profile));
-        if !allows_refresh_bootstrap {
+        if !from_gcloud_adc && !runtime_credentials {
+            return Err(missing_credentials_error(&provider_type));
+        }
+        let allows_empty_credentials = if runtime_credentials {
+            provider_profile_allows_empty_credentials(
+                &fetch_provider_profile(&mut client, &provider_type).await?,
+            )
+        } else {
+            fetch_provider_profile(&mut client, &provider_type)
+                .await
+                .ok()
+                .is_some_and(|profile| provider_profile_allows_empty_credentials(&profile))
+        };
+        if !allows_empty_credentials {
+            if runtime_credentials {
+                return Err(miette::miette!(
+                    "--runtime-credentials is only valid for provider profiles whose required credentials are resolved at runtime"
+                ));
+            }
             return Err(missing_credentials_error(&provider_type));
         }
     }
@@ -4665,8 +4725,8 @@ pub async fn provider_create(
     Ok(())
 }
 
-fn provider_profile_allows_refresh_bootstrap(profile: &ProviderProfile) -> bool {
-    ProviderTypeProfile::from_proto(profile).allows_gateway_refresh_bootstrap()
+fn provider_profile_allows_empty_credentials(profile: &ProviderProfile) -> bool {
+    ProviderTypeProfile::from_proto(profile).allows_empty_provider_credentials()
 }
 
 pub async fn provider_get(server: &str, name: &str, tls: &TlsOptions) -> Result<()> {
@@ -7537,19 +7597,18 @@ mod tests {
         ProvisioningStep, TlsOptions, build_sandbox_resource_limits,
         dockerfile_sources_supported_for_gateway, format_endpoint, format_gateway_select_header,
         format_gateway_select_items, format_provider_attachment_table, gateway_add,
-        gateway_auth_label, gateway_env_override_warning, gateway_select_with, gateway_type_label,
-        git_sync_files, http_health_check, image_requests_gpu, import_local_package_mtls_bundle,
+        gateway_auth_label, gateway_env_override_warning, gateway_select_with, gateway_to_json,
+        gateway_type_label, git_sync_files, http_health_check, import_local_package_mtls_bundle,
         inferred_provider_type, mtls_certs_exist_for_gateway, package_managed_tls_dirs,
         parse_cli_setting_value, parse_credential_expiry_cli_value, parse_credential_expiry_pairs,
         parse_credential_pairs, parse_driver_config_json, plaintext_gateway_is_remote,
-        progress_step_from_metadata, provider_profile_allows_refresh_bootstrap,
+        progress_step_from_metadata, provider_profile_allows_empty_credentials,
         provisioning_timeout_message, ready_false_condition_message, refresh_status_header,
         refresh_status_row, resolve_from, sandbox_should_persist, sandbox_upload_plan,
         service_expose_status_error, service_url_for_gateway,
     };
     use crate::TEST_ENV_LOCK;
     use hyper::StatusCode;
-    use openshell_bootstrap::{load_active_gateway, load_gateway_metadata, store_gateway_metadata};
     use std::fs;
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -7558,15 +7617,18 @@ mod tests {
     use std::thread;
     use tonic::Status;
 
-    use openshell_bootstrap::GatewayMetadata;
+    use openshell_bootstrap::{
+        GatewayMetadata, GatewayMetadataSource, ListedGateway, load_active_gateway,
+        load_gateway_metadata, load_user_active_gateway, store_gateway_metadata,
+    };
     use openshell_core::progress::{
         PROGRESS_STEP_PULLING_IMAGE, PROGRESS_STEP_REQUESTING_SANDBOX,
         PROGRESS_STEP_STARTING_SANDBOX,
     };
     use openshell_core::proto::{
         Provider, ProviderCredentialRefresh, ProviderCredentialRefreshStatus,
-        ProviderCredentialRefreshStrategy, ProviderProfile, ProviderProfileCredential,
-        SandboxCondition, SandboxStatus, datamodel::v1::ObjectMeta,
+        ProviderCredentialRefreshStrategy, ProviderCredentialTokenGrant, ProviderProfile,
+        ProviderProfileCredential, SandboxCondition, SandboxStatus, datamodel::v1::ObjectMeta,
     };
 
     struct EnvVarGuard {
@@ -7618,6 +7680,22 @@ mod tests {
         );
         f();
         drop(guard);
+    }
+    fn with_tmp_xdg_and_system<F: FnOnce()>(tmp: &Path, system: &Path, f: F) {
+        let _guard = TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let xdg_guard = EnvVarGuard::set(
+            "XDG_CONFIG_HOME",
+            tmp.to_str().expect("temp path should be utf-8"),
+        );
+        let system_guard = EnvVarGuard::set(
+            "OPENSHELL_SYSTEM_GATEWAY_DIR",
+            system.to_str().expect("system path should be utf-8"),
+        );
+        f();
+        drop(system_guard);
+        drop(xdg_guard);
     }
 
     fn edge_registration(name: &str, endpoint: &str) -> GatewayMetadata {
@@ -7793,7 +7871,7 @@ mod tests {
     }
 
     #[test]
-    fn refresh_bootstrap_requires_all_required_credentials_to_be_gateway_mintable() {
+    fn empty_provider_credentials_require_all_required_credentials_to_be_runtime_resolvable() {
         let refresh_token_profile = ProviderProfile {
             credentials: vec![ProviderProfileCredential {
                 name: "MS_GRAPH_ACCESS_TOKEN".to_string(),
@@ -7806,8 +7884,24 @@ mod tests {
             }],
             ..Default::default()
         };
-        assert!(provider_profile_allows_refresh_bootstrap(
+        assert!(provider_profile_allows_empty_credentials(
             &refresh_token_profile
+        ));
+
+        let token_grant_profile = ProviderProfile {
+            credentials: vec![ProviderProfileCredential {
+                name: "ACCESS_TOKEN".to_string(),
+                required: true,
+                token_grant: Some(ProviderCredentialTokenGrant {
+                    token_endpoint: "https://auth.example.com/token".to_string(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert!(provider_profile_allows_empty_credentials(
+            &token_grant_profile
         ));
 
         let mixed_static_profile = ProviderProfile {
@@ -7830,7 +7924,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        assert!(!provider_profile_allows_refresh_bootstrap(
+        assert!(!provider_profile_allows_empty_credentials(
             &mixed_static_profile
         ));
 
@@ -7846,7 +7940,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        assert!(provider_profile_allows_refresh_bootstrap(
+        assert!(provider_profile_allows_empty_credentials(
             &optional_refresh_profile
         ));
     }
@@ -8042,36 +8136,6 @@ mod tests {
     fn sandbox_should_persist_when_forward_is_requested() {
         let spec = openshell_core::forward::ForwardSpec::new(8080);
         assert!(sandbox_should_persist(false, Some(&spec)));
-    }
-
-    #[test]
-    fn image_requests_gpu_matches_known_gpu_image_names() {
-        for image in [
-            "ghcr.io/nvidia/openshell-community/sandboxes/nvidia-gpu:latest",
-            "registry.example.com/team/gpu:dev",
-            "nvcr.io/example/my-gpu-image@sha256:deadbeef",
-        ] {
-            assert!(
-                image_requests_gpu(image),
-                "expected GPU detection for {image}"
-            );
-        }
-    }
-
-    #[test]
-    fn image_requests_gpu_ignores_non_gpu_image_names() {
-        for image in [
-            "ghcr.io/nvidia/openshell-community/sandboxes/base:latest",
-            "registry.example.com/gpu/team/base:latest",
-            "registry.example.com/team/notebook:latest",
-            "cuda-toolkit:latest",
-            "registry.example.com/team/graphics:latest",
-        ] {
-            assert!(
-                !image_requests_gpu(image),
-                "did not expect GPU detection for {image}"
-            );
-        }
     }
 
     #[test]
@@ -8562,6 +8626,26 @@ mod tests {
     }
 
     #[test]
+    fn gateway_to_json_includes_config_source() {
+        let gateway = ListedGateway {
+            metadata: GatewayMetadata {
+                name: "local-vm".to_string(),
+                gateway_endpoint: "http://127.0.0.1:17670".to_string(),
+                auth_mode: Some("plaintext".to_string()),
+                ..Default::default()
+            },
+            source: GatewayMetadataSource::System,
+        };
+
+        let json = gateway_to_json(&gateway, &Some("local-vm".to_string()));
+
+        assert_eq!(json["source"], "system");
+        assert_eq!(json["type"], "local");
+        assert_eq!(json["auth"], "plaintext");
+        assert_eq!(json["active"], true);
+    }
+
+    #[test]
     fn gateway_auth_label_defaults_https_gateways_to_mtls() {
         let gateway = GatewayMetadata {
             name: "local".to_string(),
@@ -8926,7 +9010,7 @@ mod tests {
     }
 
     #[test]
-    fn refresh_bootstrap_allows_oauth2_refresh_token() {
+    fn empty_provider_credentials_allow_oauth2_refresh_token() {
         use openshell_core::proto::{
             ProviderCredentialRefresh, ProviderCredentialRefreshStrategy, ProviderProfile,
             ProviderProfileCredential,
@@ -8945,7 +9029,7 @@ mod tests {
             ..Default::default()
         };
         assert!(
-            provider_profile_allows_refresh_bootstrap(&profile),
+            provider_profile_allows_empty_credentials(&profile),
             "Oauth2RefreshToken should be allowed for refresh bootstrap"
         );
     }
@@ -9007,6 +9091,46 @@ mod tests {
             );
         });
     }
+    #[test]
+    fn gateway_add_oidc_rollback_keeps_system_active_fallback_userless() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let user = tempfile::tempdir().expect("create user tmpdir");
+        let system = tempfile::tempdir().expect("create system tmpdir");
+        with_tmp_xdg_and_system(user.path(), system.path(), || {
+            fs::write(system.path().join("active_gateway"), "system-default")
+                .expect("write system active gateway");
+            assert_eq!(load_user_active_gateway(), None);
+            assert_eq!(load_active_gateway().as_deref(), Some("system-default"));
+
+            let runtime = tokio::runtime::Runtime::new().expect("create runtime");
+            runtime.block_on(async {
+                gateway_add(
+                    "https://gateway.example.com",
+                    Some("oidc-fail"),
+                    None,
+                    false,
+                    Some("http://127.0.0.1:1/realms/nonexistent"),
+                    "openshell-cli",
+                    None,
+                    None,
+                    false,
+                )
+                .await
+                .expect("gateway_add should not return Err on auth failure");
+            });
+
+            assert!(
+                load_gateway_metadata("oidc-fail").is_err(),
+                "failed OIDC gateway should be removed after auth failure"
+            );
+            assert_eq!(
+                load_user_active_gateway(),
+                None,
+                "rollback should not persist the system fallback into user config"
+            );
+            assert_eq!(load_active_gateway().as_deref(), Some("system-default"));
+        });
+    }
 
     #[test]
     fn gateway_add_cloud_rolls_back_on_auth_failure() {
@@ -9064,6 +9188,48 @@ mod tests {
                 Some("existing-gw"),
                 "active gateway should be restored after rollback"
             );
+        });
+    }
+    #[test]
+    fn gateway_add_cloud_rollback_keeps_system_active_fallback_userless() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let user = tempfile::tempdir().expect("create user tmpdir");
+        let system = tempfile::tempdir().expect("create system tmpdir");
+        with_tmp_xdg_and_system(user.path(), system.path(), || {
+            let _no_browser = EnvVarGuard::set("OPENSHELL_NO_BROWSER", "0");
+            let _browser_auth_failure = EnvVarGuard::set("OPENSHELL_TEST_BROWSER_AUTH_FAIL", "1");
+            fs::write(system.path().join("active_gateway"), "system-default")
+                .expect("write system active gateway");
+            assert_eq!(load_user_active_gateway(), None);
+            assert_eq!(load_active_gateway().as_deref(), Some("system-default"));
+
+            let runtime = tokio::runtime::Runtime::new().expect("create runtime");
+            runtime.block_on(async {
+                gateway_add(
+                    "https://127.0.0.1:1",
+                    Some("cloud-fail"),
+                    None,
+                    false,
+                    None,
+                    "openshell-cli",
+                    None,
+                    None,
+                    false,
+                )
+                .await
+                .expect("gateway_add should not return Err on auth failure");
+            });
+
+            assert!(
+                load_gateway_metadata("cloud-fail").is_err(),
+                "failed cloud gateway should be removed after auth failure"
+            );
+            assert_eq!(
+                load_user_active_gateway(),
+                None,
+                "rollback should not persist the system fallback into user config"
+            );
+            assert_eq!(load_active_gateway().as_deref(), Some("system-default"));
         });
     }
 }

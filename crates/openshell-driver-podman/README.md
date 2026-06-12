@@ -46,9 +46,48 @@ The container spec in `container.rs` sets these security-critical fields:
 | `no_new_privileges` | `true` | Prevents privilege escalation after exec. |
 | `seccomp_profile_path` | `unconfined` | The supervisor installs its own policy-aware BPF filter. A container-level profile can block Landlock/seccomp syscalls during setup. |
 | `mounts` | Private tmpfs at `/run/netns` | Lets the supervisor create named network namespaces in rootless Podman. |
-| CDI GPU devices | Sandbox `gpu_device` value when set, otherwise all NVIDIA GPUs | Exposes requested GPUs to GPU-enabled sandbox containers. |
+| CDI GPU devices | `driver_config.cdi_devices` when set, otherwise all NVIDIA GPUs | Exposes requested GPUs to GPU-enabled sandbox containers. |
 
 The restricted agent child does not retain these supervisor privileges.
+
+## Driver Config Mounts
+
+The gateway forwards the `podman` block from `--driver-config-json` to this
+driver. The driver accepts user-supplied `mounts` entries with these Podman
+mount types:
+
+- `bind`: mounts an absolute host path when `[openshell.drivers.podman]`
+  has `enable_bind_mounts = true`.
+- `volume`: mounts an existing Podman named volume. The driver validates that
+  the volume exists before provisioning and never creates or removes it. Podman
+  local-driver volumes created with bind options are treated as host bind
+  mounts and require `enable_bind_mounts = true`.
+- `tmpfs`: mounts an in-memory filesystem with optional `options`,
+  `size_bytes`, and `mode`.
+- `image`: mounts an OCI image through Podman's image-volume API. The driver
+  pulls the image during provisioning using the sandbox image pull policy.
+
+Host bind mounts are disabled by default because they expose gateway host paths
+to sandbox requests. The driver still uses internal bind mounts for
+OpenShell-owned token and TLS material.
+
+Podman `bind` mounts accept `source`, `target`, and optional `read_only`.
+User-supplied bind and volume mounts are read-only by default; set
+`read_only: false` to make them writable. Podman image and volume mounts do not
+support `subpath` in OpenShell driver config. Mount targets must be absolute
+container paths and must not replace the workspace root (`/sandbox`) or overlap
+OpenShell supervisor files, `/etc/openshell`, `/etc/openshell-tls`, or
+`/run/netns`.
+
+Example named-volume usage:
+
+```shell
+podman volume create openshell-work
+
+openshell sandbox create \
+  --driver-config-json '{"podman":{"mounts":[{"type":"volume","source":"openshell-work","target":"/sandbox/work"}]}}' \
+  -- claude
+```
 
 ### Capability Breakdown
 

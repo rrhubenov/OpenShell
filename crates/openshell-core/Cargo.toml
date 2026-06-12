@@ -13,7 +13,8 @@ repository.workspace = true
 [dependencies]
 prost = { workspace = true }
 prost-types = { workspace = true }
-tonic = { workspace = true, features = ["channel", "tls"] }
+tonic = { workspace = true, features = ["channel", "tls-native-roots"] }
+tonic-prost = { workspace = true }
 tokio = { workspace = true }
 thiserror = { workspace = true }
 miette = { workspace = true }
@@ -42,7 +43,7 @@ dev-settings = []
 test-helpers = []
 
 [build-dependencies]
-tonic-build = { workspace = true }
+tonic-prost-build = { workspace = true }
 protobuf-src = { workspace = true }
 
 [dev-dependencies]

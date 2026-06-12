@@ -132,6 +132,9 @@ pub struct ServerState {
     /// `IssueSandboxToken` bootstrap path. Only present when the gateway
     /// runs in-cluster.
     pub k8s_sa_authenticator: Option<Arc<auth::k8s_sa::K8sServiceAccountAuthenticator>>,
+
+    /// Gateway-wide gRPC request rate limiter shared by every multiplex path.
+    pub(crate) grpc_rate_limiter: Option<multiplex::GrpcRateLimiter>,
 }
 
 fn is_benign_tls_handshake_failure(error: &std::io::Error) -> bool {
@@ -164,6 +167,7 @@ impl ServerState {
         supervisor_sessions: Arc<supervisor_session::SupervisorSessionRegistry>,
         oidc_cache: Option<Arc<auth::oidc::JwksCache>>,
     ) -> Self {
+        let grpc_rate_limiter = multiplex::GrpcRateLimiter::from_config(&config);
         Self {
             config,
             store,
@@ -180,6 +184,7 @@ impl ServerState {
             sandbox_jwt_issuer: None,
             sandbox_jwt_authenticator: None,
             k8s_sa_authenticator: None,
+            grpc_rate_limiter,
         }
     }
 }
@@ -337,6 +342,8 @@ pub async fn run_server(
 
     let state = Arc::new(state);
 
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
     // Resume sandboxes that were stopped during the previous gateway
     // shutdown so the running compute state matches the persisted store.
     // Runs before watchers spawn so the watch loop sees the post-resume
@@ -345,7 +352,7 @@ pub async fn run_server(
         warn!(error = %err, "Failed to resume persisted sandboxes during startup");
     }
 
-    state.compute.spawn_watchers();
+    state.compute.spawn_watchers(shutdown_rx.clone());
     ssh_sessions::spawn_session_reaper(store.clone(), Duration::from_secs(3600));
     supervisor_session::spawn_relay_reaper(state.clone(), Duration::from_secs(30));
     provider_refresh::spawn_refresh_worker(state.clone(), Duration::from_secs(60));
@@ -426,7 +433,6 @@ pub async fn run_server(
         None
     };
 
-    let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let mut listener_tasks = Vec::with_capacity(gateway_listeners.len());
     let enable_loopback_service_http = config.service_routing.enable_loopback_service_http;
     for (listener, listen_addr) in gateway_listeners {
@@ -1365,6 +1371,21 @@ service_account_name = "sandbox-sa"
         let cfg = kubernetes_config_for_k8s_sa_bootstrap(Some(&file)).unwrap();
         assert_eq!(cfg.namespace, "sandboxes");
         assert_eq!(cfg.service_account_name, "sandbox-sa");
+    }
+
+    #[test]
+    fn podman_config_reads_bind_mount_opt_in_from_driver_table() {
+        let file: crate::config_file::ConfigFile = toml::from_str(
+            r"
+[openshell.drivers.podman]
+enable_bind_mounts = true
+",
+        )
+        .expect("valid config");
+
+        let cfg = crate::podman_config_from_file(Some(&file)).expect("podman config");
+
+        assert!(cfg.enable_bind_mounts);
     }
 
     #[test]

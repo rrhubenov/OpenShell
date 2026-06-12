@@ -40,6 +40,16 @@ template resource limits. Docker and Podman apply them as runtime limits.
 Kubernetes mirrors each limit into the matching request. VM accepts the fields
 but currently ignores them.
 
+Docker and Podman also accept per-sandbox driver-config mounts for existing
+runtime-managed named volumes and tmpfs mounts. Podman additionally accepts
+image mounts through its image-volume API. User-supplied bind and volume mounts
+default to read-only. Direct host bind mounts, and Docker or Podman local-driver
+bind-backed named volumes, are available only when explicitly enabled in the
+active local driver table of `gateway.toml`. Host bind mounts are an unsafe
+operator override because they place gateway-host filesystem state inside the
+sandbox and can negate OpenShell workspace isolation and filesystem-policy
+controls. Driver-owned supervisor, token, and TLS bind mounts stay reserved.
+
 Kubernetes deployments may set an AppArmor profile on sandbox agent containers
 through the driver configuration. The Helm chart defaults sandbox agents to
 `Unconfined` so runtime/default AppArmor profiles do not block supervisor
@@ -87,8 +97,11 @@ runtime still owns GPU device injection.
 ## Deployment Shape
 
 Kubernetes deployments use the Helm chart under `deploy/helm/openshell`. The
-chart deploys the gateway and sandbox runtime integration, but HA deployments
-must point `server.externalDbSecret` at an operator-managed PostgreSQL database.
+chart deploys the gateway and sandbox runtime integration. The default gateway
+workload is a StatefulSet for SQLite-backed single-replica installs. External
+database-backed installs can render a Deployment with `workload.kind=deployment`;
+HA deployments must point `server.externalDbSecret` at an operator-managed
+PostgreSQL database.
 Standalone local deployments start the gateway with a selected runtime such as
 Docker, Podman, or VM. The CLI can register multiple gateways and switch between
 them without changing the sandbox architecture.

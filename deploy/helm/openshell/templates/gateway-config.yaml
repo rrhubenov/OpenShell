@@ -4,7 +4,7 @@
 ConfigMap holding the gateway TOML config file (RFC 0003).
 
 The gateway reads `/etc/openshell/gateway.toml` (mounted from this ConfigMap)
-at startup. CLI flags and OPENSHELL_* env vars on the StatefulSet container
+at startup. CLI flags and OPENSHELL_* env vars on the gateway workload container
 still override anything in this file.
 
 One value is intentionally NOT rendered here:
@@ -56,6 +56,17 @@ data:
     {{- if $sans }}
     server_sans = [{{- range $i, $san := $sans }}{{ if $i }}, {{ end }}{{ $san | quote }}{{- end }}]
     {{- end }}
+    {{- $rlRequests := int .Values.server.grpcRateLimit.requests }}
+    {{- $rlWindowSeconds := int .Values.server.grpcRateLimit.windowSeconds }}
+    {{- if or (lt $rlRequests 0) (lt $rlWindowSeconds 0) }}
+    {{- fail "server.grpcRateLimit.requests and server.grpcRateLimit.windowSeconds must not be negative; they map to unsigned gateway settings" }}
+    {{- end }}
+    {{- if and (gt $rlRequests 0) (gt $rlWindowSeconds 0) }}
+    grpc_rate_limit_requests       = {{ $rlRequests }}
+    grpc_rate_limit_window_seconds = {{ $rlWindowSeconds }}
+    {{- else if or (gt $rlRequests 0) (gt $rlWindowSeconds 0) }}
+    {{- fail "server.grpcRateLimit requires both requests and windowSeconds to be positive to enable rate limiting, or both 0/unset to disable it" }}
+    {{- end }}
 
     {{- if not .Values.server.disableTls }}
 
@@ -103,6 +114,9 @@ data:
     service_account_name         = {{ include "openshell.sandboxServiceAccountName" . | quote }}
     supervisor_sideload_method   = {{ include "openshell.supervisorSideloadMethod" . | quote }}
     sa_token_ttl_secs            = {{ .Values.server.sandboxJwt.k8sSaTokenTtlSecs | default 3600 }}
+    {{- if .Values.server.providerTokenGrants.spiffe.enabled }}
+    provider_spiffe_workload_api_socket_path = {{ .Values.server.providerTokenGrants.spiffe.workloadApiSocketPath | quote }}
+    {{- end }}
     {{- if .Values.server.sandboxImagePullPolicy }}
     image_pull_policy            = {{ .Values.server.sandboxImagePullPolicy | quote }}
     {{- end }}

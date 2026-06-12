@@ -98,6 +98,11 @@ guest_tls_ca            = "/etc/openshell/certs/ca.pem"
 guest_tls_cert          = "/etc/openshell/certs/client.pem"
 guest_tls_key           = "/etc/openshell/certs/client-key.pem"
 
+# Optional gRPC rate limit. Both values must be positive to enable the limit.
+# Set either value to 0, or omit both, to disable rate limiting.
+grpc_rate_limit_requests       = 120
+grpc_rate_limit_window_seconds = 60
+
 # Gateway listener TLS (distinct from the per-driver guest_tls_*).
 [openshell.gateway.tls]
 cert_path             = "/etc/openshell/certs/gateway.pem"
@@ -184,6 +189,11 @@ workspace_default_storage_size = "10Gi"
 # default_runtime_class_name   = "kata-containers"
 # Kubelet clamps projected tokens below 600 seconds. The driver caps values at 86400.
 sa_token_ttl_secs              = 3600
+# Optional SPIFFE Workload API socket mounted into sandbox pods for dynamic
+# provider token grants. Use an absolute path under a dedicated directory;
+# shared roots such as /run, /var, /tmp, and /etc are rejected.
+# Supervisor-to-gateway auth still uses gateway JWTs.
+provider_spiffe_workload_api_socket_path = "/spiffe-workload-api/spire-agent.sock"
 ```
 
 ### Docker
@@ -215,6 +225,10 @@ guest_tls_key      = "/etc/openshell/certs/client-key.pem"
 network_name       = "openshell-docker"
 host_gateway_ip    = "172.17.0.1"
 ssh_socket_path    = "/run/openshell/ssh.sock"
+# Unsafe operator override. Host bind mounts, including Docker local-driver
+# bind-backed volumes, expose gateway-host paths inside sandboxes and can
+# negate OpenShell isolation and filesystem controls.
+enable_bind_mounts = false
 # Set to 0 to leave Docker's runtime default unchanged.
 sandbox_pids_limit = 2048
 ```
@@ -250,8 +264,16 @@ supervisor_image        = "ghcr.io/nvidia/openshell/supervisor:latest"
 guest_tls_ca            = "/etc/openshell/certs/ca.pem"
 guest_tls_cert          = "/etc/openshell/certs/client.pem"
 guest_tls_key           = "/etc/openshell/certs/client-key.pem"
+# Unsafe operator override. Host bind mounts, including Podman local-driver
+# bind-backed volumes, expose gateway-host paths inside sandboxes and can
+# negate OpenShell isolation and filesystem controls.
+enable_bind_mounts      = false
 # Set to 0 to leave Podman's runtime default unchanged.
 sandbox_pids_limit      = 2048
+# Health check interval in seconds. Lower values detect readiness faster
+# but increase process churn (each check spawns a conmon subprocess).
+# Set to 0 to disable health checks entirely. Default: 10.
+health_check_interval_secs = 10
 ```
 
 ### MicroVM

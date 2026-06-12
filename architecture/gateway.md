@@ -37,6 +37,10 @@ health, metrics, or tunnel routes. The plaintext service router also rejects
 browser requests whose Fetch Metadata, Origin, or Referer headers indicate a
 cross-origin or sibling-subdomain request.
 
+Operators can configure a gateway-wide gRPC request rate limit. The limit is
+applied only to gRPC API traffic after protocol multiplexing; health, metrics,
+and local sandbox-service HTTP routes are not rate limited by this control.
+
 Supported auth modes:
 
 | Mode | Use |
@@ -47,9 +51,13 @@ Supported auth modes:
 | Cloudflare JWT | Edge-authenticated deployments where Cloudflare Access supplies identity. |
 | OIDC | Bearer-token auth for users, with browser PKCE or client credentials login. |
 
-Sandbox supervisor RPCs authenticate with gateway-minted sandbox JWTs when that
-authenticator is configured; mTLS does not grant sandbox identity. User-facing
-mutations are authorized by role policy when OIDC or edge identity is enabled.
+Sandbox supervisor RPCs authenticate with explicit sandbox credentials; mTLS
+does not grant sandbox identity. Kubernetes deployments use the
+gateway-minted JWT bootstrap path: the supervisor starts with a projected
+ServiceAccount token, exchanges it for a gateway-minted sandbox JWT, and uses
+that JWT on subsequent gateway RPCs.
+User-facing mutations are authorized by role policy when OIDC or edge identity
+is enabled.
 
 Sandbox secrets are gateway-signed JWTs bound to a single sandbox ID. Docker,
 Podman, and VM drivers deliver the initial token through supervisor-only
@@ -380,8 +388,8 @@ hook Job using the gateway image itself -- no separate cert-generation image,
 no extra mirror burden in air-gapped environments. In the default built-in PKI
 path the hook creates TLS and sandbox JWT Secrets. When cert-manager is enabled,
 cert-manager owns TLS Secrets and the hook runs with `--jwt-only` so the
-required sandbox JWT Secret still exists before the gateway StatefulSet mounts
-it, even if `pkiInitJob.enabled` remains true. On package-managed local
+required sandbox JWT Secret still exists before the gateway workload mounts it,
+even if `pkiInitJob.enabled` remains true. On package-managed local
 gateways, the same command runs from the systemd
 unit's `ExecStartPre` to bootstrap PKI into the configured local TLS directory
 on first start. The Linux package unit defaults that directory to
@@ -437,6 +445,21 @@ driver's own table.
 Driver-specific values that are not part of the inheritance allowlist
 (e.g. Podman `socket_path`, VM `vcpus`) only come from the driver's own
 table.
+
+### Package-managed gateway registry
+
+The CLI reads its active-gateway and per-gateway metadata from
+`$XDG_CONFIG_HOME/openshell/`. It also looks for a package-manager owned
+system config root at `/etc/openshell`, using the same layout as the per-user
+config root: `active_gateway` plus `gateways/<name>/metadata.json`. Packages
+or runtimes that need a different location can override that root with a
+non-empty absolute `OPENSHELL_SYSTEM_GATEWAY_DIR`; empty or relative values
+fall back to `/etc/openshell` and emit a warning. The CLI falls back to this
+system config when no per-user `metadata.json` exists; malformed user metadata
+still shadows the system entry, but stray empty directories do not.
+
+System entries are read-only from the CLI, so `gateway remove` rejects a pure
+system entry instead of pretending to delete package-manager owned state.
 
 ## Operational Constraints
 
