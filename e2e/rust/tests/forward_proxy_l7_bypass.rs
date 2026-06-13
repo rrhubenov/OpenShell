@@ -115,7 +115,11 @@ try:
     resp = urllib.request.urlopen(url, timeout=15)
     print(json.dumps({{"status": resp.status, "error": None}}))
 except urllib.error.HTTPError as e:
-    print(json.dumps({{"status": e.code, "error": str(e)}}))
+    try:
+        body = e.read().decode("utf-8", errors="replace")
+    except Exception as be:
+        body = f"<read body failed: {{be}}>"
+    print(json.dumps({{"status": e.code, "error": str(e), "body": body}}))
 except Exception as e:
     print(json.dumps({{"status": -1, "error": str(e)}}))
 "#,

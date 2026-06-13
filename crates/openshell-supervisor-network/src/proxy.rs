@@ -3152,8 +3152,8 @@ async fn handle_forward_proxy(
                 &build_json_error_response(
                     403,
                     "Forbidden",
-                    "policy_denied",
-                    &format!("{method} {host_lc}:{port}{path} not permitted by policy"),
+                    "policy_denied_fwd_l4",
+                    &format!("{method} {host_lc}:{port}{path} not permitted by policy [fwd_l4]"),
                 ),
             )
             .await?;
@@ -3172,8 +3172,8 @@ async fn handle_forward_proxy(
                 &build_json_error_response(
                     403,
                     "Forbidden",
-                    "policy_denied",
-                    &format!("{method} {host_lc}:{port}{path} not permitted by policy"),
+                    "policy_denied_fwd_stale_post_l4",
+                    &format!("{method} {host_lc}:{port}{path} not permitted by policy [fwd_stale_post_l4]"),
                 ),
             )
             .await?;
@@ -3240,8 +3240,10 @@ async fn handle_forward_proxy(
                 &build_json_error_response(
                     403,
                     "Forbidden",
-                    "policy_denied",
-                    &format!("{method} {host_lc}:{port}{path} not permitted by policy"),
+                    "policy_denied_fwd_stale_pre_l7",
+                    &format!(
+                        "{method} {host_lc}:{port}{path} not permitted by policy [fwd_stale_pre_l7]"
+                    ),
                 ),
             )
             .await?;
@@ -3257,8 +3259,8 @@ async fn handle_forward_proxy(
                     &build_json_error_response(
                         403,
                         "Forbidden",
-                        "policy_denied",
-                        &format!("{method} {host_lc}:{port}{path} not permitted by policy"),
+                        "policy_denied_fwd_tunnel_clone",
+                        &format!("{method} {host_lc}:{port}{path} not permitted by policy [fwd_tunnel_clone]"),
                     ),
                 )
                 .await?;
@@ -3329,8 +3331,8 @@ async fn handle_forward_proxy(
                 &build_json_error_response(
                     403,
                     "Forbidden",
-                    "policy_denied",
-                    &format!("{method} {host_lc}:{port}{path} did not match an L7 endpoint path"),
+                    "policy_denied_fwd_no_l7_match",
+                    &format!("{method} {host_lc}:{port}{path} did not match an L7 endpoint path [fwd_no_l7_match]"),
                 ),
             )
             .await?;
@@ -3499,8 +3501,8 @@ async fn handle_forward_proxy(
                 &build_json_error_response(
                     403,
                     "Forbidden",
-                    "policy_denied",
-                    &format!("{method} {host_lc}:{port}{path} denied by L7 policy: {reason}"),
+                    "policy_denied_fwd_l7_rule",
+                    &format!("{method} {host_lc}:{port}{path} denied by L7 policy: {reason} [fwd_l7_rule]"),
                 ),
             )
             .await?;
@@ -3577,8 +3579,8 @@ async fn handle_forward_proxy(
                     &build_json_error_response(
                         403,
                         "Forbidden",
-                        "ssrf_denied",
-                        &format!("{method} {host_lc}:{port} blocked: trusted-gateway check failed"),
+                        "ssrf_denied_fwd_gateway",
+                        &format!("{method} {host_lc}:{port} blocked: trusted-gateway check failed [fwd_ssrf_gateway]"),
                     ),
                 )
                 .await?;
@@ -3634,9 +3636,9 @@ async fn handle_forward_proxy(
                             &build_json_error_response(
                                 403,
                                 "Forbidden",
-                                "ssrf_denied",
+                                "ssrf_denied_fwd_allowed_ips",
                                 &format!(
-                                    "{method} {host_lc}:{port} blocked: allowed_ips check failed"
+                                    "{method} {host_lc}:{port} blocked: allowed_ips check failed [fwd_ssrf_allowed_ips]"
                                 ),
                             ),
                         )
@@ -3686,9 +3688,9 @@ async fn handle_forward_proxy(
                     &build_json_error_response(
                         403,
                         "Forbidden",
-                        "ssrf_denied",
+                        "ssrf_denied_fwd_invalid_cidr",
                         &format!(
-                            "{method} {host_lc}:{port} blocked: invalid allowed_ips in policy"
+                            "{method} {host_lc}:{port} blocked: invalid allowed_ips in policy [fwd_ssrf_invalid_cidr]"
                         ),
                     ),
                 )
@@ -3742,9 +3744,9 @@ async fn handle_forward_proxy(
                     &build_json_error_response(
                         403,
                         "Forbidden",
-                        "ssrf_denied",
+                        "ssrf_denied_fwd_declared",
                         &format!(
-                            "{method} {host_lc}:{port} blocked: declared endpoint check failed"
+                            "{method} {host_lc}:{port} blocked: declared endpoint check failed [fwd_ssrf_declared]"
                         ),
                     ),
                 )
@@ -3797,8 +3799,8 @@ async fn handle_forward_proxy(
                     &build_json_error_response(
                         403,
                         "Forbidden",
-                        "ssrf_denied",
-                        &format!("{method} {host_lc}:{port} blocked: internal address"),
+                        "ssrf_denied_fwd_internal",
+                        &format!("{method} {host_lc}:{port} blocked: internal address [fwd_ssrf_internal]"),
                     ),
                 )
                 .await?;
@@ -3815,8 +3817,10 @@ async fn handle_forward_proxy(
             &build_json_error_response(
                 403,
                 "Forbidden",
-                "policy_denied",
-                &format!("{method} {host_lc}:{port}{path} not permitted by policy"),
+                "policy_denied_fwd_stale_post_dns",
+                &format!(
+                    "{method} {host_lc}:{port}{path} not permitted by policy [fwd_stale_post_dns]"
+                ),
             ),
         )
         .await?;
@@ -3951,8 +3955,10 @@ async fn handle_forward_proxy(
             &build_json_error_response(
                 403,
                 "Forbidden",
-                "policy_denied",
-                &format!("{method} {host_lc}:{port}{path} not permitted by policy"),
+                "policy_denied_fwd_stale_pre_relay",
+                &format!(
+                    "{method} {host_lc}:{port}{path} not permitted by policy [fwd_stale_pre_relay]"
+                ),
             ),
         )
         .await?;
